@@ -11,6 +11,8 @@ from io import BytesIO
 from datetime import datetime, timedelta
 from itertools import cycle
 
+BOT_TOKEN = os.getenv("BOT_TOKEN", "8508156791:AAGwJIOao8rqF860d8zbUkN8G_3skArWYqs")
+ADMIN_ID = int(os.getenv("ADMIN_ID", 8305539348))
 # --- ENV SOZLAMALARI ---
 from dotenv import load_dotenv
 load_dotenv() # .env faylidan o'qish (faqat lokal kompyuterda ishlaydi)
