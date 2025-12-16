@@ -6,3 +6,4 @@ python-pptx
 fastapi
 uvicorn
 requests
+python-dotenv
