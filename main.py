@@ -27,7 +27,7 @@ from aiogram.types import (
     BufferedInputFile, CallbackQuery
 )
 from aiogram.utils.keyboard import InlineKeyboardBuilder
-from aiogram.exceptions import TelegramForbiddenError
+from aiogram.exceptions import TelegramForbiddenError, TelegramBadRequest
 from aiogram.utils.deep_linking import create_start_link
 
 # --- WEB SERVER ---
@@ -56,7 +56,7 @@ ADMIN_ID = int(os.environ.get("ADMIN_ID", 0))
 ADMIN_USERNAME = os.environ.get("ADMIN_USERNAME", "admin")
 KARTA_RAQAMI = os.environ.get("KARTA_RAQAMI", "8600 0000 0000 0000")
 DATABASE_URL = os.environ.get("DATABASE_URL")
-REFERRAL_BONUS = 10000  # Do'st taklif qilganlik uchun summa
+REFERRAL_BONUS = 10000
 
 groq_keys_str = os.environ.get("GROQ_KEYS", "")
 GROQ_API_KEYS = groq_keys_str.split(",") if "," in groq_keys_str else [groq_keys_str]
@@ -70,7 +70,7 @@ DEFAULT_PRICES = {
 
 # --- LIBS ---
 from docx import Document
-from docx.shared import Pt, Cm, RGBColor
+from docx.shared import Pt, Cm
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from pptx import Presentation
 from pptx.util import Pt as PptxPt, Inches as PptxInches
@@ -92,19 +92,16 @@ def check_font():
 check_font()
 
 # ==============================================================================
-# DATABASE (Full Log System)
-# ==============================================================================
-# ==============================================================================
-# DATABASE (Full Log System + Migrations)
+# DATABASE SYSTEM
 # ==============================================================================
 pool = None
 
 async def init_db():
     global pool
     try:
-        pool = await asyncpg.create_pool(dsn=DATABASE_URL)
+        pool = await asyncpg.create_pool(dsn=DATABASE_URL, min_size=1, max_size=10)
         async with pool.acquire() as conn:
-            # 1. USERS jadvali
+            # Users
             await conn.execute("""
                 CREATE TABLE IF NOT EXISTS users (
                     user_id BIGINT PRIMARY KEY, username TEXT, full_name TEXT, 
@@ -114,15 +111,13 @@ async def init_db():
                     is_blocked INTEGER DEFAULT 0, joined_date TEXT
                 )
             """)
-            
-            # MIGRATION: Users jadvalini yangilash
             try:
                 await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS referral_id BIGINT DEFAULT 0")
                 await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS invited_count INTEGER DEFAULT 0")
                 await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS free_pdf INTEGER DEFAULT 2")
-            except Exception as e: print(f"Users Migration Info: {e}")
+            except: pass
 
-            # 2. HISTORY jadvali
+            # History
             await conn.execute("""
                 CREATE TABLE IF NOT EXISTS history (
                     id SERIAL PRIMARY KEY, user_id BIGINT, 
@@ -131,8 +126,6 @@ async def init_db():
                     date TEXT
                 )
             """)
-
-            # MIGRATION: History jadvaliga ustunlar qo'shish
             try:
                 await conn.execute("ALTER TABLE history ADD COLUMN IF NOT EXISTS student TEXT DEFAULT '-'")
                 await conn.execute("ALTER TABLE history ADD COLUMN IF NOT EXISTS uni TEXT DEFAULT '-'")
@@ -140,29 +133,21 @@ async def init_db():
                 await conn.execute("ALTER TABLE history ADD COLUMN IF NOT EXISTS grp TEXT DEFAULT '-'")
                 await conn.execute("ALTER TABLE history ADD COLUMN IF NOT EXISTS subject TEXT DEFAULT '-'")
                 await conn.execute("ALTER TABLE history ADD COLUMN IF NOT EXISTS teacher TEXT DEFAULT '-'")
-            except Exception as e: print(f"History Migration Info: {e}")
-            
-            # 3. TRANSACTIONS jadvali
-            await conn.execute("CREATE TABLE IF NOT EXISTS transactions (id SERIAL PRIMARY KEY, user_id BIGINT, amount INTEGER, date TEXT, type TEXT)")
-            try: 
-                await conn.execute("ALTER TABLE transactions ADD COLUMN IF NOT EXISTS type TEXT DEFAULT 'payment'")
             except: pass
-
-            # 4. PRICES va ADMINS
+            
+            # Other tables
+            await conn.execute("CREATE TABLE IF NOT EXISTS transactions (id SERIAL PRIMARY KEY, user_id BIGINT, amount INTEGER, date TEXT, type TEXT)")
             await conn.execute("CREATE TABLE IF NOT EXISTS prices (key TEXT PRIMARY KEY, value INTEGER)")
             await conn.execute("CREATE TABLE IF NOT EXISTS admins (user_id BIGINT PRIMARY KEY, added_date TEXT)")
             
             for k, v in DEFAULT_PRICES.items():
                 await conn.execute("INSERT INTO prices (key, value) VALUES ($1, $2) ON CONFLICT (key) DO NOTHING", k, v)
-            
             if ADMIN_ID:
                 await conn.execute("INSERT INTO admins (user_id, added_date) VALUES ($1, $2) ON CONFLICT (user_id) DO NOTHING", ADMIN_ID, datetime.now().isoformat())
-            
-            print("✅ Baza ulandi va jadvallar yangilandi.")
+            print("✅ Baza yuklandi.")
     except Exception as e: print(f"DB Error: {e}")
 
-# --- DB Functions (MANA SHULAR O'CHIB KETGAN EDI) ---
-
+# DB Helper Functions
 async def get_user(uid):
     if not pool: return None
     async with pool.acquire() as conn: return await conn.fetchrow("SELECT * FROM users WHERE user_id=$1", uid)
@@ -177,13 +162,12 @@ async def create_user(uid, uname, fname, referrer_id=0):
                 VALUES ($1, $2, $3, $4, $5)
             """, uid, uname, fname, referrer_id, datetime.now().strftime("%Y-%m-%d"))
             
-            # Referral Bonus Logic
             if referrer_id != 0 and referrer_id != uid:
                 try:
                     await conn.execute("UPDATE users SET balance = balance + $1, invited_count = invited_count + 1 WHERE user_id = $2", REFERRAL_BONUS, referrer_id)
                     await conn.execute("INSERT INTO transactions (user_id, amount, date, type) VALUES ($1, $2, $3, 'referral_bonus')", referrer_id, REFERRAL_BONUS, datetime.now().strftime("%Y-%m-%d %H:%M"))
+                    return True
                 except: pass
-                return True # Bonus berildi
         else:
             await conn.execute("UPDATE users SET full_name=$1, username=$2 WHERE user_id=$3", fname, uname, uid)
         return False
@@ -224,6 +208,7 @@ async def get_admins():
     async with pool.acquire() as conn:
         rows = await conn.fetch("SELECT user_id FROM admins")
         return [r['user_id'] for r in rows]
+
 # ==============================================================================
 # ENGINES & DESIGNS
 # ==============================================================================
@@ -240,7 +225,6 @@ def extract_json_array(text):
         return []
     except: return []
 
-# 🎨 PPTX THEMES (10 Types)
 PPTX_THEMES = {
     "modern_blue": {"bg": (240,248,255), "main": (0,51,102), "txt": (20,20,40), "shape": MSO_SHAPE.ROUNDED_RECTANGLE},
     "elegant_dark": {"bg": (30,30,35), "main": (255,215,0), "txt": (240,240,240), "shape": MSO_SHAPE.RECTANGLE},
@@ -265,7 +249,6 @@ def create_presentation(data_list, info, design="modern_blue"):
     slide = prs.slides.add_slide(prs.slide_layouts[6])
     slide.background.fill.solid(); slide.background.fill.fore_color.rgb = bg_rgb
     
-    # Border/Shape
     shape = slide.shapes.add_shape(th['shape'], PptxInches(0.5), PptxInches(0.5), PptxInches(9), PptxInches(6.5))
     shape.fill.background(); shape.line.color.rgb = main_rgb; shape.line.width = PptxPt(4)
     
@@ -285,19 +268,16 @@ def create_presentation(data_list, info, design="modern_blue"):
         slide = prs.slides.add_slide(prs.slide_layouts[6])
         slide.background.fill.solid(); slide.background.fill.fore_color.rgb = bg_rgb
         
-        # Header
         head = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, 0, 0, PptxInches(10), PptxInches(1.2))
         head.fill.solid(); head.fill.fore_color.rgb = main_rgb
         
         ht = slide.shapes.add_textbox(PptxInches(0.5), PptxInches(0.2), PptxInches(9), PptxInches(0.8))
         hp = ht.text_frame.add_paragraph(); hp.text = clean_text(item['title']); hp.font.size = PptxPt(32); hp.font.bold = True; hp.font.color.rgb = PptxRGB(255,255,255); hp.alignment = PP_ALIGN.CENTER
         
-        # Content Box
         bt = slide.shapes.add_textbox(PptxInches(0.5), PptxInches(1.5), PptxInches(9), PptxInches(5.5))
         tf = bt.text_frame; tf.word_wrap = True
         
         content = clean_text(item['content'])
-        # Dynamic Font Sizing to fill page
         length = len(content)
         fs = 24 if length < 200 else 20 if length < 400 else 16 if length < 600 else 14
         
@@ -307,13 +287,11 @@ def create_presentation(data_list, info, design="modern_blue"):
 
     out = BytesIO(); prs.save(out); out.seek(0); return out
 
-# DOCX ENGINE
 def create_document(data_list, info, doc_type="Referat"):
     doc = Document()
     style = doc.styles['Normal']; style.font.name = 'Times New Roman'; style.font.size = Pt(14); style.paragraph_format.line_spacing = 1.5
     for s in doc.sections: s.top_margin = Cm(2); s.bottom_margin = Cm(2); s.left_margin = Cm(3); s.right_margin = Cm(1.5)
 
-    # Titul
     for _ in range(4): doc.add_paragraph()
     p = doc.add_paragraph("O'ZBEKISTON RESPUBLIKASI\nOLIY TA'LIM, FAN VA INNOVATSIYALAR VAZIRLIGI"); p.alignment = WD_ALIGN_PARAGRAPH.CENTER; p.runs[0].bold = True
     if info['edu_place'] != "-": p = doc.add_paragraph(info['edu_place'].upper()); p.alignment = WD_ALIGN_PARAGRAPH.CENTER; p.runs[0].bold = True
@@ -329,7 +307,6 @@ def create_document(data_list, info, doc_type="Referat"):
     fill_row(0, "Bajardi", info['student']); fill_row(1, "Guruh", info['group']); fill_row(2, "Fakultet", info['direction']); fill_row(3, "Fan", info['subject']); fill_row(4, "Qabul qildi", info['teacher'])
     
     doc.add_page_break()
-    # Mundarija
     p = doc.add_paragraph("MUNDARIJA"); p.alignment = WD_ALIGN_PARAGRAPH.CENTER; p.runs[0].bold=True
     for item in data_list: doc.add_paragraph(item['title'])
     doc.add_page_break()
@@ -341,7 +318,6 @@ def create_document(data_list, info, doc_type="Referat"):
     
     out = BytesIO(); doc.save(out); out.seek(0); return out
 
-# PDF ENGINE
 class PDF(FPDF):
     def footer(self):
         self.set_y(-15); self.set_font("DejaVu", '', 10); self.cell(0, 10, f'{self.page_no()}', align='C')
@@ -371,7 +347,7 @@ def create_pdf(data_list, info, doc_type="Referat"):
     out = BytesIO(); out.write(pdf.output()); out.seek(0); return out
 
 # ==============================================================================
-# AI LOGIC (Loop & Full Content)
+# AI LOGIC
 # ==============================================================================
 async def call_groq(messages):
     if not GROQ_API_KEYS: return None
@@ -400,14 +376,13 @@ async def generate_full_content(topic, pages, doc_type, custom_plan, status_msg)
         if not titles: titles = [f"{topic} - {i}-qism" for i in range(1, pages+1)]
         
         data = []
-        # FOR LOOP to fill pages
         for i, t in enumerate(titles[:pages]):
             await progress(10 + int((i/len(titles))*85), f"Slayd yozilmoqda: {t}")
             p_text = f"Mavzu: {topic}. Slayd: {t}. Ushbu slayd uchun to'liq, 150-200 so'zdan iborat, punktlarga bo'lingan mazmunli matn yoz. Kirish so'zlarisiz."
             content = await call_groq([{"role":"user", "content":p_text}])
             data.append({"title": t, "content": content or "..."})
         return data
-    else: # DOCX/PDF
+    else: 
         num = max(6, int(pages/2) + 2)
         prompt = f"Mavzu: {topic}. {num} ta bobdan iborat reja."
         if custom_plan != "-": prompt += f" Reja: {custom_plan}"
@@ -450,7 +425,19 @@ async def start(m: types.Message, command: CommandObject):
             await m.bot.send_message(referrer_id, f"🎉 <b>Tabriklaymiz!</b>\nSiz do'stingizni taklif qildingiz va hisobingizga <b>{REFERRAL_BONUS:,} so'm</b> qo'shildi!", parse_mode="HTML")
             
         await m.answer(txt, parse_mode="HTML", reply_markup=main_kb)
-    except Exception as e: print(e)
+    except: pass
+
+@router.message(F.text == "📞 Yordam")
+async def help_cmd(m: types.Message):
+    txt = (
+        "<b>🆘 YORDAM MARKAZI</b>\n\n"
+        "1️⃣ <b>Qanday buyurtma beraman?</b>\n"
+        "Menyudan <i>Taqdimot</i>, <i>Referat</i> yoki <i>Mustaqil ish</i> tugmasini bosing va bot so'ragan ma'lumotlarni kiriting.\n\n"
+        "2️⃣ <b>To'lov qanday qilinadi?</b>\n"
+        "<i>To'lov qilish</i> tugmasini bosib, kerakli summani tanlang. Chekni yuborganingizdan so'ng, admin tasdiqlaydi.\n\n"
+        f"👤 <b>Admin:</b> @{ADMIN_USERNAME}"
+    )
+    await m.answer(txt, parse_mode="HTML", reply_markup=main_kb)
 
 @router.message(F.text == "💰 Balans & Referal")
 async def balance(m: types.Message):
@@ -467,7 +454,6 @@ async def balance(m: types.Message):
         )
         await m.answer(txt, parse_mode="HTML")
 
-# ... (Payment and Common Handlers remain similar but improved UI) ...
 @router.message(F.text == "💳 To'lov qilish")
 async def pay_menu(m: types.Message):
     kb = InlineKeyboardBuilder()
@@ -496,7 +482,6 @@ async def approve(c: CallbackQuery):
         await c.message.delete(); await c.bot.send_message(int(uid), f"✅ <b>To'lov qabul qilindi:</b> +{int(amt):,} so'm", parse_mode="HTML")
     except: pass
 
-# --- GENERATION FLOW ---
 @router.message(F.text.in_(["📊 Taqdimot", "📝 Mustaqil ish", "📑 Referat"]))
 async def start_order(m: types.Message, state: FSMContext):
     u = await get_user(m.from_user.id)
@@ -534,7 +519,6 @@ async def get_teach(m: types.Message, state: FSMContext):
     d = await state.get_data()
     if d['dtype'] == "taqdimot":
         kb = InlineKeyboardBuilder()
-        # 10 ta dizayn tugmalari
         themes_list = list(PPTX_THEMES.keys())
         for th in themes_list: kb.button(text=th.replace("_", " ").title(), callback_data=f"d_{th}")
         kb.adjust(2)
@@ -578,14 +562,13 @@ async def generate(c: CallbackQuery, state: FSMContext):
         if not is_free and u['balance'] < cost:
             return await c.message.answer(f"❌ <b>Mablag' yetarli emas!</b>\nNarxi: {cost:,} so'm", parse_mode="HTML", reply_markup=main_kb)
             
-        msg = await c.message.answer("⏳ <b>Qabul qilindi!</b>\nAI ishga tushdi, bu biroz vaqt oladi...", parse_mode="HTML")
-        
-        # Generation
+        msg = await c.message.answer("⏳ <b>Qabul qilindi!</b>\nAI ishga tushdi...", parse_mode="HTML")
         content = await generate_full_content(d['topic'], pages, d['dtype'], d['plan'], msg)
+        
         if not content: return await msg.edit_text("❌ Xatolik. Qayta urinib ko'ring.")
         
         info = {k: d.get(k, "-") for k in ['topic','student','uni','fac','grp','subj','teacher']}
-        info['edu_place'] = d.get('uni', '-') # Mapping for legacy keys
+        info['edu_place'] = d.get('uni', '-')
         info['direction'] = d.get('fac', '-')
         info['group'] = d.get('grp', '-')
         info['subject'] = d.get('subj', '-')
@@ -602,8 +585,6 @@ async def generate(c: CallbackQuery, state: FSMContext):
         
         if is_free: await update_limit(uid, limit_key, -1)
         else: await update_balance(uid, -cost, "service_fee")
-        
-        # FULL LOGGING
         await add_full_hist(uid, d['dtype'], d['topic'], pages, info)
         
     except Exception as e:
@@ -611,21 +592,21 @@ async def generate(c: CallbackQuery, state: FSMContext):
         await c.message.answer("Texnik xatolik.", reply_markup=main_kb)
     await state.clear()
 
-# --- ADMIN PANEL PRO ---
+# --- ADMIN PANEL (TUZATILGAN) ---
 @router.message(Command("admin"))
 async def admin_main(m: types.Message):
     if await is_admin(m.from_user.id):
         kb = InlineKeyboardBuilder()
-        kb.button(text="📊 To'liq Hisobot (Full Log)", callback_data="adm_full_log")
-        kb.button(text="✉️ Reklama Yuborish", callback_data="adm_bc")
-        kb.button(text="🛠 Narxlarni Sozlash", callback_data="adm_prices")
-        kb.button(text="🚪 Chiqish", callback_data="close")
+        kb.button(text="📊 Hisobot (Full Log)", callback_data="adm_full_log")
+        kb.button(text="✉️ Reklama", callback_data="adm_bc")
+        kb.button(text="🛠 Narxlar", callback_data="adm_prices")
+        kb.button(text="🚪 Yopish", callback_data="close")
         kb.adjust(1)
         await m.answer("<b>🕴 ADMIN PANEL PRO</b>", parse_mode="HTML", reply_markup=kb.as_markup())
 
 @router.callback_query(F.data == "adm_full_log")
 async def adm_log_dl(c: CallbackQuery):
-    await c.message.answer("⏳ Katta hisobot yuklanmoqda...")
+    await c.message.answer("⏳ Yuklanmoqda...")
     async with pool.acquire() as conn:
         data = await conn.fetch("""
             SELECT h.date, u.full_name, u.username, u.user_id, h.doc_type, h.topic, h.student, h.uni, h.faculty, h.grp, h.teacher 
@@ -639,19 +620,27 @@ async def adm_log_dl(c: CallbackQuery):
 
 @router.callback_query(F.data == "adm_prices")
 async def adm_prices_ui(c: CallbackQuery):
+    # Old xabarni o'chirishga harakat qilamiz, bo'lmasa yangi yozamiz
+    try: await c.message.delete()
+    except: pass
+
     kb = InlineKeyboardBuilder()
+    txt = "💰 <b>NARXLARNI SOZLASH</b>\n\n"
     for k in DEFAULT_PRICES.keys():
         v = await get_price(k)
-        kb.button(text=f"{k.upper()}: {v:,}", callback_data=f"setp_{k}")
+        txt += f"▫️ {k.upper()}: <b>{v:,} so'm</b>\n"
+        kb.button(text=f"✏️ {k.upper()}", callback_data=f"setp_{k}")
+    
     kb.button(text="🔙 Orqaga", callback_data="close")
     kb.adjust(2)
-    await c.message.edit_text("💰 <b>Narxlarni o'zgartirish:</b>", parse_mode="HTML", reply_markup=kb.as_markup())
+    await c.message.answer(txt, parse_mode="HTML", reply_markup=kb.as_markup())
 
 @router.callback_query(F.data.startswith("setp_"))
 async def adm_set_p(c: CallbackQuery, state: FSMContext):
     key = c.data.split("_", 1)[1]
     await state.update_data(pk=key)
-    await c.message.answer(f"✍️ <b>{key}</b> uchun yangi narxni yozing:", parse_mode="HTML", reply_markup=cancel_kb)
+    await c.message.delete()
+    await c.message.answer(f"✍️ <b>{key.upper()}</b> uchun yangi narxni yozing:", parse_mode="HTML", reply_markup=cancel_kb)
     await state.set_state(AdminState.price_val)
 
 @router.message(AdminState.price_val)
@@ -669,12 +658,6 @@ async def close_cb(c: CallbackQuery): await c.message.delete()
 @router.message(F.text == "❌ Bekor qilish")
 async def cancel_all(m: types.Message, state: FSMContext): await state.clear(); await m.answer("Bekor qilindi.", reply_markup=main_kb)
 
-async def get_admins():
-    async with pool.acquire() as conn:
-        rows = await conn.fetch("SELECT user_id FROM admins")
-        return [r['user_id'] for r in rows]
-
-# --- MAIN ---
 async def main():
     await init_db()
     asyncio.create_task(run_web_server())
