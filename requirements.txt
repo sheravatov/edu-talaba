@@ -1,9 +1,9 @@
 aiogram==3.10.0
 openai>=1.0.0
-aiosqlite
 python-docx
 python-pptx
 fastapi
 uvicorn
 requests
 python-dotenv
+asyncpg
