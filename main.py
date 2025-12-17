@@ -11,11 +11,9 @@ from io import BytesIO
 from datetime import datetime, timedelta
 from itertools import cycle
 
-BOT_TOKEN = os.getenv("BOT_TOKEN", "8508156791:AAGwJIOao8rqF860d8zbUkN8G_3skArWYqs")
-ADMIN_ID = int(os.getenv("ADMIN_ID", 8305539348))
 # --- ENV SOZLAMALARI ---
 from dotenv import load_dotenv
-load_dotenv() # .env faylidan o'qish (faqat lokal kompyuterda ishlaydi)
+load_dotenv()
 
 from aiogram import Bot, Dispatcher, F, types, Router
 from aiogram.filters import CommandStart, Command, Filter
@@ -34,7 +32,7 @@ import uvicorn
 app = FastAPI()
 
 @app.get("/")
-async def health_check(): return {"status": "Alive", "mode": "Secure-Env"}
+async def health_check(): return {"status": "Alive", "mode": "GitHub-Safe"}
 
 async def run_web_server():
     port = int(os.environ.get("PORT", 8000))
@@ -45,31 +43,26 @@ async def run_web_server():
 # --- OPENAI (GROQ) ---
 from openai import AsyncOpenAI
 
-# 1. KONFIGURATSIYA (ENV DAN OLADI)
-# Agar ENV da bo'lmasa, xatolik bermasligi uchun default qiymat yoki bo'sh qator
-BOT_TOKEN = os.getenv("8508156791:AAGwJIOao8rqF860d8zbUkN8G_3skArWYqs")
-ADMIN_ID = int(os.getenv("ADMIN_ID", 8305539348)) # Default sizning ID
-ADMIN_USERNAME = "@edu_talabauz"
-BOT_USERNAME = "@edu_talaba_bot"
-KARTA_RAQAMI = "9860 1966 0136 7531 (Ism Sheravatov.Shaxzod)"
+# 1. KONFIGURATSIYA (FAQAT OS.ENVIRON DAN OLADI)
+BOT_TOKEN = os.environ.get("BOT_TOKEN") # Renderdan oladi
+ADMIN_ID = int(os.environ.get("ADMIN_ID", 0)) # Renderdan oladi
+ADMIN_USERNAME = os.environ.get("ADMIN_USERNAME", "admin")
+BOT_USERNAME = os.environ.get("BOT_USERNAME", "bot")
+KARTA_RAQAMI = os.environ.get("KARTA_RAQAMI", "Karta kiritilmagan")
 
-# KALITLARNI ENV DAN OLIB, LISTGA AYLANTIRISH
-groq_keys_str = os.getenv("GROQ_KEYS", "")
+# GROQ KEYS NI RENDERDAN OLIB PARSE QILAMIZ
+groq_keys_str = os.environ.get("GROQ_KEYS", "")
 if "," in groq_keys_str:
     GROQ_API_KEYS = groq_keys_str.split(",")
 else:
     GROQ_API_KEYS = [groq_keys_str] if groq_keys_str else []
 
 if not GROQ_API_KEYS:
-    print("DIQQAT: API kalitlar topilmadi!")
-    # Xatolik chiqmasligi uchun soxta kalit qo'shib turamiz (kod sinmasligi uchun)
-    GROQ_API_KEYS = ["gsk_dummy_key"]
+    # Xatolik bermasligi uchun dummy
+    GROQ_API_KEYS = ["gsk_placeholder"]
 
 api_key_cycle = cycle(GROQ_API_KEYS)
-
 GROQ_MODELS = ["llama-3.3-70b-versatile", "llama-3.1-8b-instant"]
-
-# ... (KODNING QOLGAN QISMI O'ZGARISHLARSIZ DAVOM ETADI) ...
 
 DB_NAME = "bot_database.db"
 DEFAULT_PRICES = {
@@ -87,7 +80,7 @@ from pptx.dml.color import RGBColor as PptxRGB
 from pptx.enum.text import PP_ALIGN
 
 # ==============================================================================
-# 2. DATABASE
+# 2. DATABASE & HELPERS
 # ==============================================================================
 async def init_db():
     async with aiosqlite.connect(DB_NAME) as db:
@@ -181,12 +174,12 @@ async def get_financial_report():
         async with db.execute(f"SELECT SUM(amount) FROM transactions WHERE date LIKE '{today}%'") as c: t=await c.fetchone(); daily=t[0] if t[0] else 0
         async with db.execute(f"SELECT SUM(amount) FROM transactions WHERE date LIKE '{month}%'") as c: t=await c.fetchone(); monthly=t[0] if t[0] else 0
         async with db.execute(f"SELECT SUM(amount) FROM transactions") as c: t=await c.fetchone(); total=t[0] if t[0] else 0
-        query = "SELECT t.date, u.full_name, u.user_id, t.amount FROM transactions t JOIN users u ON t.user_id = u.user_id ORDER BY t.id DESC LIMIT 50"
+        query = """SELECT t.date, u.full_name, u.user_id, t.amount FROM transactions t JOIN users u ON t.user_id = u.user_id ORDER BY t.id DESC LIMIT 50"""
         async with db.execute(query) as c: last_txs = await c.fetchall()
     return daily, monthly, total, last_txs
 
 # ==============================================================================
-# 3. FORMATTING (PPTX BIG FONT & DOCX FILL)
+# 3. FORMATTING (PPTX FIXED ALIGNMENT)
 # ==============================================================================
 def set_font_style(run, size=14, bold=False):
     run.font.name = 'Times New Roman'
@@ -205,18 +198,18 @@ def add_markdown_paragraph(paragraph, text):
         else:
             run.text = part; set_font_style(run, 14, False)
 
-# --- PPTX: KATTA SHRIFT, ZICH EMAS, LEKIN TO'LA ---
-def add_pptx_markdown_text(text_frame, text, font_size, color=None, font_name="Arial"):
+# --- PPTX MATN FUNKSIYASI (FIXED SIZE) ---
+def add_pptx_markdown_text(text_frame, text, font_size=14, color=None, font_name="Arial"):
     p = text_frame.add_paragraph()
-    p.space_after = PptxPt(14) # Orasini ochamiz
-    p.line_spacing = 1.2       # Qatorlar orasi kengroq
-    
+    p.space_after = PptxPt(6) 
+    p.line_spacing = 1.0 # Zich
     parts = re.split(r'(\*\*.*?\*\*)', text)
     for part in parts:
         run = p.add_run()
-        run.font.size = PptxPt(font_size)
+        run.font.size = PptxPt(font_size) # 14pt (250 so'z uchun mos)
         run.font.name = font_name
         if color: run.font.color.rgb = color
+        
         if part.startswith('**') and part.endswith('**'):
             run.text = part[2:-2]; run.font.bold = True
         else:
@@ -232,42 +225,48 @@ def create_presentation(data_list, title_info, design="blue"):
     }
     th = themes.get(design, themes["blue"])
 
-    # Slide 1
+    # Slide 1 (Titul)
     slide = prs.slides.add_slide(prs.slide_layouts[6])
     slide.background.fill.solid(); slide.background.fill.fore_color.rgb = th["bg"]
     shape = slide.shapes.add_shape(1, 0, 0, PptxInches(4), prs.slide_height)
     shape.fill.solid(); shape.fill.fore_color.rgb = th["acc"]; shape.line.fill.background()
+    
     tb = slide.shapes.add_textbox(PptxInches(1), PptxInches(2), PptxInches(8), PptxInches(3))
     p = tb.text_frame.paragraphs[0]
     p.text = title_info['topic'].upper(); p.font.size = PptxPt(40); p.font.bold = True; p.font.name = "Arial"; p.font.color.rgb = th["tit"]; p.alignment = PP_ALIGN.CENTER
     tb.text_frame.word_wrap = True
+    
     ib = slide.shapes.add_textbox(PptxInches(1), PptxInches(5), PptxInches(8), PptxInches(2))
     ip = ib.text_frame.paragraphs[0]
     ip.text = f"Tayyorladi: {title_info['student']}\nFan: {title_info['subject']}\nQabul qildi: {title_info['teacher']}"
-    ip.font.size = PptxPt(20); ip.font.color.rgb = th["txt"]; ip.font.name = "Arial"; ip.alignment = PP_ALIGN.CENTER
+    ip.font.size = PptxPt(18); ip.font.color.rgb = th["txt"]; ip.font.name = "Arial"; ip.alignment = PP_ALIGN.CENTER
 
-    # Slides
+    # Slides (Content)
     for s_data in data_list:
         slide = prs.slides.add_slide(prs.slide_layouts[6])
         slide.background.fill.solid(); slide.background.fill.fore_color.rgb = th["bg"]
+        
+        # Header Line
         line = slide.shapes.add_shape(1, PptxInches(0.5), PptxInches(1.2), PptxInches(9), PptxInches(0.05))
         line.fill.solid(); line.fill.fore_color.rgb = th["acc"]
         
+        # Sarlavha (Tepada, aniq joylashgan)
         tbox = slide.shapes.add_textbox(PptxInches(0.5), PptxInches(0.2), PptxInches(9), PptxInches(1))
         tp = tbox.text_frame.paragraphs[0]
-        tp.text = s_data.get("title", "Mavzu"); tp.font.size = PptxPt(32); tp.font.bold = True; tp.font.color.rgb = th["tit"]; tp.font.name = "Arial"
+        tp.text = s_data.get("title", "Mavzu"); tp.font.size = PptxPt(28); tp.font.bold = True; tp.font.color.rgb = th["tit"]; tp.font.name = "Arial"
         
+        # MATN QUTISI (ANIQ O'LCHAMLAR)
         bbox = slide.shapes.add_textbox(PptxInches(0.5), PptxInches(1.4), PptxInches(9.0), PptxInches(5.5))
-        tf = bbox.text_frame; tf.word_wrap = True
+        tf = bbox.text_frame
+        tf.word_wrap = True
         
         content = s_data.get("content", "")
-        # MATNGA QARAB KATTA SHRIFT (20-24pt)
-        # Maqsad: Kam so'z bo'lsa ham slaydni to'ldirib tursin
-        char_cnt = len(content)
-        if char_cnt < 300: font_size = 26
-        elif char_cnt < 500: font_size = 22
-        elif char_cnt < 800: font_size = 18
-        else: font_size = 14
+        # Matn uzunligiga qarab shriftni avtomatik tanlash
+        char_count = len(content)
+        if char_count > 1200: font_size = 10
+        elif char_count > 800: font_size = 11
+        elif char_count > 600: font_size = 12
+        else: font_size = 14 # Standart
         
         paragraphs = content.split('\n')
         for para in paragraphs:
@@ -318,8 +317,17 @@ def create_document(full_text_data, title_info, doc_type="Referat"):
     return out
 
 # ==============================================================================
-# 4. AI LOGIKA (DOCX MORE CONTENT + PPTX LESS WORDS)
+# 4. AI LOGIKA (ROTATION)
 # ==============================================================================
+def extract_json(text):
+    try: return json.loads(text)
+    except:
+        match = re.search(r'\{.*\}', text, re.DOTALL)
+        if match:
+            try: return json.loads(match.group(0))
+            except: pass
+    return None
+
 async def call_groq_with_rotation(messages, json_mode=False):
     if json_mode:
         found = False
@@ -332,8 +340,7 @@ async def call_groq_with_rotation(messages, json_mode=False):
         for model in GROQ_MODELS:
             try:
                 temp_client = AsyncOpenAI(api_key=api_key, base_url="https://api.groq.com/openai/v1")
-                # Max tokens oshirildi (DOCX uchun)
-                kwargs = {"model": model, "messages": messages, "temperature": 0.7, "max_tokens": 2048}
+                kwargs = {"model": model, "messages": messages, "temperature": 0.7}
                 if json_mode: kwargs["response_format"] = {"type": "json_object"}
                 response = await temp_client.chat.completions.create(**kwargs)
                 await temp_client.close()
@@ -349,12 +356,12 @@ async def generate_groq_content(topic, pages, doc_type, custom_plan, status_msg=
 
     if doc_type == "taqdimot":
         await progress(10, "Slayd rejasi...")
-        plan_text = custom_plan if custom_plan and custom_plan != "-" else f"Mavzu: {topic}. {pages} ta slayd uchun reja tuz."
+        plan_text = custom_plan if custom_plan and custom_plan != "-" else f"Mavzu: {topic}. {pages} ta slayd uchun qisqa sarlavhalar."
         plan_res = await call_groq_with_rotation([{"role": "user", "content": plan_text}], json_mode=False)
         
         if plan_res:
             slides_titles = [c.strip() for c in re.split(r'[,\n]', plan_res) if len(c.strip()) > 3][:pages]
-            if len(slides_titles) < 3: slides_titles = [f"{topic} haqida", "Asosiy qism", "Xulosa"]
+            if len(slides_titles) < 3: slides_titles = [f"{topic} haqida", "Tahlil", "Xulosa"]
         else: slides_titles = ["Kirish", "Asosiy qism", "Xulosa"]
 
         full_slides_data = []
@@ -362,10 +369,10 @@ async def generate_groq_content(topic, pages, doc_type, custom_plan, status_msg=
             pct = int((i/len(slides_titles))*90) + 10
             await progress(pct, f"Slayd yozilmoqda: {title}")
             
-            # PPTX: 150 ta so'z (Kamroq, lekin mazmunli)
+            # 250 SO'Z (OPTIMAL)
             prompt = (f"Mavzu: {topic}. Slayd: {title}. "
-                      f"Shu slayd uchun 150 ta so'zdan iborat 4-5 ta aniq punkt yoz. "
-                      f"Juda uzun bo'lmasin. Muhim so'zlarni **qalin** qil.")
+                      f"Shu slayd uchun 200-250 so'zli, punktlarga (bullet points) bo'lingan matn yoz. "
+                      f"Juda uzun yozma, slaydga sig'sin. Muhim so'zlarni **qalin** qil.")
             
             content = await call_groq_with_rotation([{"role": "user", "content": prompt}], json_mode=False)
             if not content: content = "Ma'lumot topilmadi."
@@ -374,45 +381,30 @@ async def generate_groq_content(topic, pages, doc_type, custom_plan, status_msg=
 
         return full_slides_data
 
-    else: # Referat (DOCX) - KO'PROQ MA'LUMOT
+    else: # Referat
         await progress(5, "Reja tuzilmoqda...")
-        
-        # 1. Sahifa soniga qarab boblar sonini aniqlaymiz
-        # Har bir bob ~2 sahifa (800-1000 so'z) deb olsak:
-        target_chapters = max(5, int(pages / 2.5)) 
-        
         if custom_plan and custom_plan != "-":
             chapters = [c.strip() for c in re.split(r'[,\n]', custom_plan) if len(c.strip()) > 3]
         else:
-            plan_res = await call_groq_with_rotation([{"role": "user", "content": f"Mavzu: {topic}. Referat uchun {target_chapters} ta bob nomini vergul bilan yoz."}], json_mode=False)
-            if plan_res: chapters = [c.strip() for c in re.split(r'[,\n]', plan_res) if len(c.strip()) > 5]
+            plan_res = await call_groq_with_rotation([{"role": "user", "content": f"Mavzu: {topic}. Referat uchun 5-6 ta bob nomini vergul bilan yoz."}], json_mode=False)
+            if plan_res: chapters = [c.strip() for c in re.split(r'[,\n]', plan_res) if len(c.strip()) > 5][:8]
             else: chapters = ["Kirish", "Asosiy qism", "Xulosa"]
 
         if not chapters: chapters = ["Kirish", "Asosiy tahlil", "Xulosa"]
-        # Faqat kerakli miqdorda olamiz
-        chapters = chapters[:target_chapters]
 
         full_content = []
         for i, chap in enumerate(chapters, 1):
             pct = int((i/len(chapters))*90)
             await progress(pct, f"Yozilmoqda: {chap}")
-            
-            # DOCX: 1200+ so'z (Juda ko'p)
-            text_prompt = (f"Mavzu: {topic}. Bob: {chap}. "
-                           f"Kamida 1200 so'zli ilmiy matn yoz. "
-                           f"Matn juda batafsil, misollar bilan va ilmiy uslubda bo'lsin. "
-                           f"Muhim joylarini **qalin** qilib belgilab ket.")
-            
+            text_prompt = (f"Mavzu: {topic}. Bob: {chap}. 1000 so'zli ilmiy matn yoz. "
+                           f"Agar ma'lumot bo'lmasa, umumiy nazariy fikrlar yoz. Bo'sh qoldirma. **Qalin** so'zlar ishlat.")
             content = await call_groq_with_rotation([{"role": "user", "content": text_prompt}], json_mode=False)
-            if not content or len(content) < 100: 
-                # Fallback: Retry with simpler prompt
-                retry_p = f"Mavzu: {topic}. {chap} haqida batafsil ma'lumot ber."
-                content = await call_groq_with_rotation([{"role": "user", "content": retry_p}], json_mode=False)
+            if not content or len(content) < 50: 
+                retry_prompt = f"Mavzu: {topic}. {chap} haqida umumiy tushuncha ber. 500 so'z."
+                content = await call_groq_with_rotation([{"role": "user", "content": retry_prompt}], json_mode=False)
                 if not content: content = "Ma'lumot generatsiya qilinmadi."
-            
             full_content.append({"title": chap, "content": content})
             await asyncio.sleep(0.5)
-        
         return full_content
 
 # ==============================================================================
@@ -741,7 +733,7 @@ async def main():
     bot = Bot(token=BOT_TOKEN)
     dp = Dispatcher(storage=MemoryStorage())
     dp.include_router(router)
-    print("Bot ishladi (Full Filled PPTX & DOCX)...")
+    print("Bot ishladi (GitHub-Safe Version)...")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
