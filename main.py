@@ -407,7 +407,7 @@ skip_kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="➡�
 class Form(StatesGroup):
     type = State(); topic = State(); plan = State(); student = State(); uni = State(); fac = State(); grp = State(); subj = State(); teach = State(); design = State(); len = State(); format = State()
 class PayState(StatesGroup): screenshot = State(); amount = State()
-class AdminState(StatesGroup): bc_msg=State(); bc_id=State(); bc_text=State(); add_adm=State(); price_val=State()
+class AdminState(StatesGroup): bc_msg=State(); bc_id=State(); bc_text=State(); add_adm=State(); price_val=State(); bc_one_msg=State(); bc_one_id=State()
 
 @router.message(CommandStart())
 async def start(m: types.Message, command: CommandObject):
@@ -552,8 +552,8 @@ async def sel_fmt(c: CallbackQuery, state: FSMContext):
     kb.row(InlineKeyboardButton(text="🔙 Orqaga", callback_data="back_to_fmt"))
     await c.message.edit_text("📄 <b>Hajmni tanlang:</b>", parse_mode="HTML", reply_markup=kb.as_markup()); await state.set_state(Form.len)
 
-# --- BACK BUTTON LOGIC ---
-@router.callback_query(F.data == "back_to_design", Form.len)
+# --- BACK BUTTON LOGIC (Fixed) ---
+@router.callback_query(F.data == "back_to_design")
 async def back_to_design_handler(c: CallbackQuery, state: FSMContext):
     kb = InlineKeyboardBuilder()
     themes_list = list(PPTX_THEMES.keys())
@@ -563,7 +563,7 @@ async def back_to_design_handler(c: CallbackQuery, state: FSMContext):
     await c.message.edit_text("🎨 <b>Dizaynni tanlang:</b>", parse_mode="HTML", reply_markup=kb.as_markup())
     await state.set_state(Form.design)
 
-@router.callback_query(F.data == "back_to_fmt", Form.len)
+@router.callback_query(F.data == "back_to_fmt")
 async def back_to_fmt_handler(c: CallbackQuery, state: FSMContext):
     kb = InlineKeyboardBuilder()
     kb.button(text="Word (.docx)", callback_data="fmt_docx"); kb.button(text="PDF (.pdf)", callback_data="fmt_pdf"); kb.adjust(2)
@@ -619,11 +619,12 @@ async def generate(c: CallbackQuery, state: FSMContext):
         await c.message.answer("Texnik xatolik.", reply_markup=main_kb)
     await state.clear()
 
-# --- ADMIN PANEL PRO (SAFE MODE) ---
+# --- ADMIN PANEL PRO ---
 async def show_admin_main(m: types.Message):
     kb = InlineKeyboardBuilder()
     kb.button(text="📊 Hisobot (Log)", callback_data="adm_full_log")
-    kb.button(text="✉️ Reklama", callback_data="adm_bc")
+    kb.button(text="📢 Hammaga Xabar", callback_data="adm_bc")
+    kb.button(text="👤 Xabar (ID orqali)", callback_data="adm_send_one")
     kb.button(text="🛠 Narxlar", callback_data="adm_prices")
     kb.button(text="🚪 Yopish", callback_data="close")
     kb.adjust(1)
@@ -683,10 +684,11 @@ async def adm_save_p(m: types.Message, state: FSMContext):
     except: await m.answer("❌ Raqam yozing.")
     await state.clear()
 
+# --- BROADCAST & DIRECT MSG ---
 @router.callback_query(F.data == "adm_bc")
 async def adm_bc_ui(c: CallbackQuery, state: FSMContext):
     await c.message.delete()
-    await c.message.answer("✉️ <b>Reklama matnini (yoki rasmni) yuboring:</b>", parse_mode="HTML", reply_markup=cancel_kb)
+    await c.message.answer("✉️ <b>Reklama matnini (yoki rasmni) yuboring:</b>\n(Barcha foydalanuvchilarga boradi)", parse_mode="HTML", reply_markup=cancel_kb)
     await state.set_state(AdminState.bc_msg)
 
 @router.message(AdminState.bc_msg)
@@ -699,6 +701,31 @@ async def adm_bc_send(m: types.Message, state: FSMContext):
             try: await m.copy_to(u['user_id']); cnt+=1; await asyncio.sleep(0.05)
             except: pass
     await m.answer(f"✅ Xabar <b>{cnt}</b> ta foydalanuvchiga yuborildi.", parse_mode="HTML", reply_markup=main_kb)
+    await state.clear()
+
+@router.callback_query(F.data == "adm_send_one")
+async def adm_send_one_ui(c: CallbackQuery, state: FSMContext):
+    await c.message.delete()
+    await c.message.answer("👤 <b>Foydalanuvchi ID raqamini yozing:</b>", parse_mode="HTML", reply_markup=cancel_kb)
+    await state.set_state(AdminState.bc_one_id)
+
+@router.message(AdminState.bc_one_id)
+async def adm_get_one_id(m: types.Message, state: FSMContext):
+    try:
+        uid = int(m.text)
+        await state.update_data(target_id=uid)
+        await m.answer("✍️ <b>Endi xabarni yozing:</b>", parse_mode="HTML")
+        await state.set_state(AdminState.bc_one_msg)
+    except: await m.answer("❌ ID raqam bo'lishi kerak.")
+
+@router.message(AdminState.bc_one_msg)
+async def adm_send_one_final(m: types.Message, state: FSMContext):
+    d = await state.get_data()
+    try:
+        await m.copy_to(d['target_id'])
+        await m.answer("✅ Xabar yuborildi.", reply_markup=main_kb)
+    except Exception as e:
+        await m.answer(f"❌ Yuborib bo'lmadi. Ehtimol user botni bloklagan.\nXato: {e}", reply_markup=main_kb)
     await state.clear()
 
 @router.callback_query(F.data == "close")
