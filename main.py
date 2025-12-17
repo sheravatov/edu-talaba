@@ -3,17 +3,13 @@ import logging
 import sys
 import json
 import traceback
-import aiosqlite
+import asyncpg # PostgreSQL uchun
 import re
 import os
 import random
 from io import BytesIO
 from datetime import datetime, timedelta
 from itertools import cycle
-
-# --- ENV SOZLAMALARI ---
-from dotenv import load_dotenv
-load_dotenv()
 
 from aiogram import Bot, Dispatcher, F, types, Router
 from aiogram.filters import CommandStart, Command, Filter
@@ -32,7 +28,7 @@ import uvicorn
 app = FastAPI()
 
 @app.get("/")
-async def health_check(): return {"status": "Alive", "mode": "Fixed-Layout"}
+async def health_check(): return {"status": "Alive", "db": "PostgreSQL"}
 
 async def run_web_server():
     port = int(os.environ.get("PORT", 8000))
@@ -44,12 +40,20 @@ async def run_web_server():
 from openai import AsyncOpenAI
 
 # 1. KONFIGURATSIYA
+# Agar .env fayl bo'lsa o'qiydi (Lokal uchun), bo'lmasa Renderdan oladi
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except: pass
+
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 ADMIN_ID = int(os.environ.get("ADMIN_ID", 0))
 ADMIN_USERNAME = os.environ.get("ADMIN_USERNAME", "admin")
 BOT_USERNAME = os.environ.get("BOT_USERNAME", "bot")
 KARTA_RAQAMI = os.environ.get("KARTA_RAQAMI", "Karta kiritilmagan")
+DATABASE_URL = os.environ.get("DATABASE_URL") # NEON.TECH LINKI
 
+# API KEYS
 groq_keys_str = os.environ.get("GROQ_KEYS", "")
 if "," in groq_keys_str:
     GROQ_API_KEYS = groq_keys_str.split(",")
@@ -59,14 +63,6 @@ else:
 if not GROQ_API_KEYS: GROQ_API_KEYS = ["dummy_key"]
 api_key_cycle = cycle(GROQ_API_KEYS)
 GROQ_MODELS = ["llama-3.3-70b-versatile", "llama-3.1-8b-instant"]
-
-# --- DATABASE PATH (RENDER UCHUN MUHIM) ---
-# Agar Renderda Disk ulangan bo'lsa, /var/data yoki /data papkasida saqlaymiz
-# Aks holda shu yerni o'zida saqlaymiz
-DATA_DIR = "/var/data" if os.path.exists("/var/data") else "."
-DB_NAME = os.path.join(DATA_DIR, "bot_database.db")
-
-print(f"DATABASE PATH: {DB_NAME}")
 
 DEFAULT_PRICES = {
     "pptx_10": 5000, "pptx_15": 7000, "pptx_20": 10000,
@@ -83,33 +79,85 @@ from pptx.dml.color import RGBColor as PptxRGB
 from pptx.enum.text import PP_ALIGN, MSO_ANCHOR
 
 # ==============================================================================
-# 2. DATABASE & HELPERS
+# 2. DATABASE (PostgreSQL - asyncpg)
 # ==============================================================================
-async def init_db():
-    async with aiosqlite.connect(DB_NAME) as db:
-        await db.execute("CREATE TABLE IF NOT EXISTS users (user_id INTEGER PRIMARY KEY, username TEXT, full_name TEXT, balance INTEGER DEFAULT 0, free_pptx INTEGER DEFAULT 5, free_docx INTEGER DEFAULT 5, is_blocked INTEGER DEFAULT 0, joined_date TEXT)")
-        await db.execute("CREATE TABLE IF NOT EXISTS transactions (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, amount INTEGER, date TEXT)")
-        await db.execute("CREATE TABLE IF NOT EXISTS samples (id INTEGER PRIMARY KEY AUTOINCREMENT, file_id TEXT, caption TEXT, file_type TEXT)")
-        await db.execute("CREATE TABLE IF NOT EXISTS prices (key TEXT PRIMARY KEY, value INTEGER)")
-        await db.execute("CREATE TABLE IF NOT EXISTS admins (user_id INTEGER PRIMARY KEY, added_date TEXT)")
-        for k, v in DEFAULT_PRICES.items(): await db.execute("INSERT OR IGNORE INTO prices (key, value) VALUES (?, ?)", (k, v))
-        await db.execute("INSERT OR IGNORE INTO admins (user_id, added_date) VALUES (?, ?)", (ADMIN_ID, datetime.now().isoformat()))
-        await db.commit()
+pool = None
 
+async def init_db():
+    global pool
+    # SSL mode require qilib ulanamiz
+    pool = await asyncpg.create_pool(dsn=DATABASE_URL)
+    
+    async with pool.acquire() as conn:
+        # Users
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                user_id BIGINT PRIMARY KEY,
+                username TEXT,
+                full_name TEXT,
+                balance INTEGER DEFAULT 0,
+                free_pptx INTEGER DEFAULT 5,
+                free_docx INTEGER DEFAULT 5,
+                is_blocked INTEGER DEFAULT 0,
+                joined_date TEXT
+            )
+        """)
+        # Transactions
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS transactions (
+                id SERIAL PRIMARY KEY,
+                user_id BIGINT,
+                amount INTEGER,
+                date TEXT
+            )
+        """)
+        # Samples
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS samples (
+                id SERIAL PRIMARY KEY,
+                file_id TEXT,
+                caption TEXT,
+                file_type TEXT
+            )
+        """)
+        # Prices
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS prices (
+                key TEXT PRIMARY KEY,
+                value INTEGER
+            )
+        """)
+        # Admins
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS admins (
+                user_id BIGINT PRIMARY KEY,
+                added_date TEXT
+            )
+        """)
+        
+        # Default Prices
+        for k, v in DEFAULT_PRICES.items():
+            await conn.execute("INSERT INTO prices (key, value) VALUES ($1, $2) ON CONFLICT (key) DO NOTHING", k, v)
+        
+        # Super Admin
+        await conn.execute("INSERT INTO admins (user_id, added_date) VALUES ($1, $2) ON CONFLICT (user_id) DO NOTHING", 
+                           ADMIN_ID, datetime.now().isoformat())
+
+# --- DB FUNCTIONS (Postgres Syntax: $1, $2...) ---
 async def add_user(user_id, username, full_name):
-    async with aiosqlite.connect(DB_NAME) as db:
+    async with pool.acquire() as conn:
         try:
-            async with db.execute("SELECT user_id FROM users WHERE user_id = ?", (user_id,)) as cursor:
-                if await cursor.fetchone(): return False
-            await db.execute("INSERT INTO users (user_id, username, full_name, free_pptx, free_docx, is_blocked, joined_date) VALUES (?, ?, ?, 5, 5, 0, ?)", 
-                             (user_id, username, full_name, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
-            await db.commit()
+            await conn.execute(
+                "INSERT INTO users (user_id, username, full_name, free_pptx, free_docx, is_blocked, joined_date) VALUES ($1, $2, $3, 5, 5, 0, $4) ON CONFLICT (user_id) DO NOTHING",
+                user_id, username, full_name, datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            )
             return True
         except: return False
 
 async def get_user(user_id):
-    async with aiosqlite.connect(DB_NAME) as db:
-        async with db.execute("SELECT * FROM users WHERE user_id = ?", (user_id,)) as c: return await c.fetchone()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("SELECT * FROM users WHERE user_id = $1", user_id)
+        return row # asyncpg Record obyekti qaytadi, u tuple ga o'xshaydi
 
 async def get_or_create_user(user_id, username, full_name):
     u = await get_user(user_id)
@@ -118,83 +166,105 @@ async def get_or_create_user(user_id, username, full_name):
     return await get_user(user_id)
 
 async def update_balance(user_id, amount):
-    async with aiosqlite.connect(DB_NAME) as db:
-        await db.execute("UPDATE users SET balance = balance + ? WHERE user_id = ?", (amount, user_id)); await db.commit()
+    async with pool.acquire() as conn:
+        await conn.execute("UPDATE users SET balance = balance + $1 WHERE user_id = $2", amount, user_id)
 
 async def add_transaction(user_id, amount):
-    async with aiosqlite.connect(DB_NAME) as db:
-        await db.execute("INSERT INTO transactions (user_id, amount, date) VALUES (?, ?, ?)", (user_id, amount, datetime.now().strftime("%Y-%m-%d %H:%M:%S"))); await db.commit()
+    async with pool.acquire() as conn:
+        await conn.execute("INSERT INTO transactions (user_id, amount, date) VALUES ($1, $2, $3)", 
+                           user_id, amount, datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
 
 async def update_limit(user_id, doc_type, amount):
-    async with aiosqlite.connect(DB_NAME) as db:
-        await db.execute(f"UPDATE users SET {doc_type} = {doc_type} + ? WHERE user_id = ?", (amount, user_id)); await db.commit()
+    # doc_type: free_pptx yoki free_docx
+    # Postgresda ustun nomini parametr qilib bo'lmaydi, shuning uchun f-string
+    async with pool.acquire() as conn:
+        query = f"UPDATE users SET {doc_type} = {doc_type} + $1 WHERE user_id = $2"
+        await conn.execute(query, amount, user_id)
 
 async def toggle_block_user(user_id, block=True):
-    async with aiosqlite.connect(DB_NAME) as db:
-        await db.execute("UPDATE users SET is_blocked = ? WHERE user_id = ?", (1 if block else 0, user_id)); await db.commit()
+    async with pool.acquire() as conn:
+        await conn.execute("UPDATE users SET is_blocked = $1 WHERE user_id = $2", 1 if block else 0, user_id)
 
 async def get_all_users_ids():
-    async with aiosqlite.connect(DB_NAME) as db:
-        async with db.execute("SELECT user_id FROM users") as c: return [row[0] for row in await c.fetchall()]
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("SELECT user_id FROM users")
+        return [r['user_id'] for r in rows]
 
 async def add_sample_db(file_id, caption, file_type):
-    async with aiosqlite.connect(DB_NAME) as db:
-        await db.execute("INSERT INTO samples (file_id, caption, file_type) VALUES (?, ?, ?)", (file_id, caption, file_type)); await db.commit()
+    async with pool.acquire() as conn:
+        await conn.execute("INSERT INTO samples (file_id, caption, file_type) VALUES ($1, $2, $3)", file_id, caption, file_type)
 
 async def get_all_samples():
-    async with aiosqlite.connect(DB_NAME) as db:
-        async with db.execute("SELECT file_id, caption, file_type FROM samples") as c: return await c.fetchall()
+    async with pool.acquire() as conn:
+        return await conn.fetch("SELECT file_id, caption, file_type FROM samples")
 
 async def get_price(key):
-    async with aiosqlite.connect(DB_NAME) as db:
-        async with db.execute("SELECT value FROM prices WHERE key = ?", (key,)) as c:
-            res = await c.fetchone()
-            return res[0] if res else DEFAULT_PRICES.get(key, 5000)
+    async with pool.acquire() as conn:
+        val = await conn.fetchval("SELECT value FROM prices WHERE key = $1", key)
+        return val if val is not None else DEFAULT_PRICES.get(key, 5000)
 
 async def set_price(key, value):
-    async with aiosqlite.connect(DB_NAME) as db:
-        await db.execute("INSERT OR REPLACE INTO prices (key, value) VALUES (?, ?)", (key, value)); await db.commit()
+    async with pool.acquire() as conn:
+        await conn.execute("INSERT INTO prices (key, value) VALUES ($1, $2) ON CONFLICT (key) DO UPDATE SET value = $2", key, value)
 
 async def add_admin_db(user_id):
-    async with aiosqlite.connect(DB_NAME) as db:
-        try: await db.execute("INSERT INTO admins (user_id, added_date) VALUES (?, ?)", (user_id, datetime.now().isoformat())); await db.commit(); return True
+    async with pool.acquire() as conn:
+        try:
+            await conn.execute("INSERT INTO admins (user_id, added_date) VALUES ($1, $2) ON CONFLICT (user_id) DO NOTHING", 
+                               user_id, datetime.now().isoformat())
+            return True
         except: return False
 
 async def remove_admin_db(user_id):
-    async with aiosqlite.connect(DB_NAME) as db:
-        if user_id == ADMIN_ID: return False
-        await db.execute("DELETE FROM admins WHERE user_id = ?", (user_id,)); await db.commit(); return True
+    if user_id == ADMIN_ID: return False
+    async with pool.acquire() as conn:
+        await conn.execute("DELETE FROM admins WHERE user_id = $1", user_id)
+        return True
 
 async def get_all_admins():
-    async with aiosqlite.connect(DB_NAME) as db:
-        async with db.execute("SELECT user_id FROM admins") as c: return [row[0] for row in await c.fetchall()]
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("SELECT user_id FROM admins")
+        return [r['user_id'] for r in rows]
 
 async def is_admin_check(user_id):
     admins = await get_all_admins()
     return user_id in admins or user_id == ADMIN_ID
 
 async def get_stats_data():
-    async with aiosqlite.connect(DB_NAME) as db:
-        async with db.execute("SELECT COUNT(*) FROM users") as c: total = (await c.fetchone())[0]
-        async with db.execute("SELECT COUNT(*) FROM users WHERE is_blocked = 1") as c: blocked = (await c.fetchone())[0]
+    async with pool.acquire() as conn:
+        total = await conn.fetchval("SELECT COUNT(*) FROM users")
+        blocked = await conn.fetchval("SELECT COUNT(*) FROM users WHERE is_blocked = 1")
         today = datetime.now().strftime("%Y-%m-%d")
-        async with db.execute(f"SELECT COUNT(*) FROM users WHERE joined_date LIKE '{today}%'") as c: new = (await c.fetchone())[0]
-        async with db.execute(f"SELECT SUM(amount) FROM transactions WHERE date LIKE '{today}%'") as c: res = await c.fetchone(); inc = res[0] if res[0] else 0
+        # Postgresda LIKE uchun matnga aylantirish kerak bo'lishi mumkin, lekin text tipida saqlayapmiz
+        new = await conn.fetchval("SELECT COUNT(*) FROM users WHERE joined_date LIKE $1", f"{today}%")
+        inc = await conn.fetchval("SELECT SUM(amount) FROM transactions WHERE date LIKE $1", f"{today}%")
+        if inc is None: inc = 0
     return total, blocked, new, inc
 
 async def get_financial_report():
-    async with aiosqlite.connect(DB_NAME) as db:
+    async with pool.acquire() as conn:
         today = datetime.now().strftime("%Y-%m-%d")
         month = datetime.now().strftime("%Y-%m")
-        async with db.execute(f"SELECT SUM(amount) FROM transactions WHERE date LIKE '{today}%'") as c: t=await c.fetchone(); daily=t[0] if t[0] else 0
-        async with db.execute(f"SELECT SUM(amount) FROM transactions WHERE date LIKE '{month}%'") as c: t=await c.fetchone(); monthly=t[0] if t[0] else 0
-        async with db.execute(f"SELECT SUM(amount) FROM transactions") as c: t=await c.fetchone(); total=t[0] if t[0] else 0
-        query = """SELECT t.date, u.full_name, u.user_id, t.amount FROM transactions t JOIN users u ON t.user_id = u.user_id ORDER BY t.id DESC LIMIT 50"""
-        async with db.execute(query) as c: last_txs = await c.fetchall()
+        
+        daily = await conn.fetchval("SELECT SUM(amount) FROM transactions WHERE date LIKE $1", f"{today}%")
+        monthly = await conn.fetchval("SELECT SUM(amount) FROM transactions WHERE date LIKE $1", f"{month}%")
+        total = await conn.fetchval("SELECT SUM(amount) FROM transactions")
+        
+        if daily is None: daily = 0
+        if monthly is None: monthly = 0
+        if total is None: total = 0
+        
+        query = """
+            SELECT t.date, u.full_name, u.user_id, t.amount 
+            FROM transactions t 
+            JOIN users u ON t.user_id = u.user_id 
+            ORDER BY t.id DESC LIMIT 50
+        """
+        last_txs = await conn.fetch(query)
     return daily, monthly, total, last_txs
 
 # ==============================================================================
-# 3. FORMATTING (PPTX PERFECT DESIGN)
+# 3. FORMATTING (PPTX FIXED & DOCX)
 # ==============================================================================
 def set_font_style(run, size=14, bold=False):
     run.font.name = 'Times New Roman'
@@ -213,13 +283,10 @@ def add_markdown_paragraph(paragraph, text):
         else:
             run.text = part; set_font_style(run, 14, False)
 
-# --- PPTX: MATN JOYLASHTIRISH ---
 def add_pptx_markdown_text(text_frame, text, font_size=14, color=None, font_name="Arial"):
     p = text_frame.add_paragraph()
-    p.space_after = PptxPt(6) # Orasi zich
-    p.line_spacing = 1.1
-    p.alignment = PP_ALIGN.LEFT # Chapga tekislash
-    
+    p.space_after = PptxPt(6)
+    p.line_spacing = 1.0
     parts = re.split(r'(\*\*.*?\*\*)', text)
     for part in parts:
         run = p.add_run()
@@ -241,81 +308,46 @@ def create_presentation(data_list, title_info, design="blue"):
     }
     th = themes.get(design, themes["blue"])
 
-    # --- SLIDE 1: TITUL VAROG'I ---
-    slide = prs.slides.add_slide(prs.slide_layouts[6]) # 6 = Blank
+    # Slide 1
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
     slide.background.fill.solid(); slide.background.fill.fore_color.rgb = th["bg"]
-    
-    # Chap tomonlama bezak
-    shape = slide.shapes.add_shape(1, 0, 0, PptxInches(3), prs.slide_height)
+    shape = slide.shapes.add_shape(1, 0, 0, PptxInches(4), prs.slide_height)
     shape.fill.solid(); shape.fill.fore_color.rgb = th["acc"]; shape.line.fill.background()
     
-    # 1. Vazirlik (Eng tepada)
-    top_box = slide.shapes.add_textbox(PptxInches(3.5), PptxInches(0.5), PptxInches(6.0), PptxInches(1.0))
-    tp = top_box.text_frame.paragraphs[0]
-    tp.text = "O'ZBEKISTON RESPUBLIKASI\nOLIY TA'LIM, FAN VA INNOVATSIYALAR VAZIRLIGI"
-    tp.font.size = PptxPt(14); tp.font.bold = True; tp.font.color.rgb = th["tit"]; tp.alignment = PP_ALIGN.CENTER
+    tb = slide.shapes.add_textbox(PptxInches(1), PptxInches(2), PptxInches(8), PptxInches(3))
+    p = tb.text_frame.paragraphs[0]
+    p.text = title_info['topic'].upper(); p.font.size = PptxPt(40); p.font.bold = True; p.font.name = "Arial"; p.font.color.rgb = th["tit"]; p.alignment = PP_ALIGN.CENTER
+    tb.text_frame.word_wrap = True
     
-    # 2. Universitet (Vazirlik tagida)
-    if title_info['edu_place'] != "-":
-        uni_box = slide.shapes.add_textbox(PptxInches(3.5), PptxInches(1.5), PptxInches(6.0), PptxInches(0.8))
-        up = uni_box.text_frame.paragraphs[0]
-        up.text = title_info['edu_place'].upper()
-        up.font.size = PptxPt(16); up.font.bold = True; up.font.color.rgb = th["tit"]; up.alignment = PP_ALIGN.CENTER
+    ib = slide.shapes.add_textbox(PptxInches(1), PptxInches(5), PptxInches(8), PptxInches(2))
+    ip = ib.text_frame.paragraphs[0]
+    ip.text = f"Tayyorladi: {title_info['student']}\nFan: {title_info['subject']}\nQabul qildi: {title_info['teacher']}"
+    ip.font.size = PptxPt(18); ip.font.color.rgb = th["txt"]; ip.font.name = "Arial"; ip.alignment = PP_ALIGN.CENTER
 
-    # 3. Mavzu (O'rtada, katta)
-    topic_box = slide.shapes.add_textbox(PptxInches(3.5), PptxInches(3.0), PptxInches(6.0), PptxInches(2.5))
-    top_p = topic_box.text_frame.paragraphs[0]
-    top_p.text = title_info['topic'].upper()
-    top_p.font.size = PptxPt(36); top_p.font.bold = True; top_p.font.name = "Arial Black"; top_p.font.color.rgb = th["tit"]
-    top_p.alignment = PP_ALIGN.CENTER
-    topic_box.text_frame.word_wrap = True
-
-    # 4. Talaba ma'lumotlari (Pastda o'ngda)
-    info_text = f"Tayyorladi: {title_info['student']}\n"
-    if title_info['group'] != "-": info_text += f"Guruh: {title_info['group']}\n"
-    if title_info['direction'] != "-": info_text += f"Yo'nalish: {title_info['direction']}\n"
-    info_text += f"\nFan: {title_info['subject']}\nQabul qildi: {title_info['teacher']}"
-
-    info_box = slide.shapes.add_textbox(PptxInches(4.5), PptxInches(5.5), PptxInches(5.0), PptxInches(2.0))
-    ip = info_box.text_frame.paragraphs[0]
-    ip.text = info_text
-    ip.font.size = PptxPt(16); ip.font.color.rgb = th["txt"]; ip.font.name = "Arial"; ip.alignment = PP_ALIGN.LEFT
-
-    # --- SLIDES (CONTENT) ---
+    # Slides
     for s_data in data_list:
         slide = prs.slides.add_slide(prs.slide_layouts[6])
         slide.background.fill.solid(); slide.background.fill.fore_color.rgb = th["bg"]
-        
-        # Sarlavha Qismi (Tepada, ajratilgan)
-        # Chiziq
         line = slide.shapes.add_shape(1, PptxInches(0.5), PptxInches(1.2), PptxInches(9), PptxInches(0.05))
         line.fill.solid(); line.fill.fore_color.rgb = th["acc"]
         
-        # Sarlavha Matni
-        tbox = slide.shapes.add_textbox(PptxInches(0.5), PptxInches(0.3), PptxInches(9), PptxInches(0.8))
+        tbox = slide.shapes.add_textbox(PptxInches(0.5), PptxInches(0.2), PptxInches(9), PptxInches(1))
         tp = tbox.text_frame.paragraphs[0]
-        tp.text = s_data.get("title", "Mavzu"); tp.font.size = PptxPt(32); tp.font.bold = True; tp.font.color.rgb = th["tit"]; tp.font.name = "Arial"
+        tp.text = s_data.get("title", "Mavzu"); tp.font.size = PptxPt(28); tp.font.bold = True; tp.font.color.rgb = th["tit"]; tp.font.name = "Arial"
         
-        # ASOSIY MATN QUTISI (ANIQ CHEGARALAR BILAN)
-        # Left: 0.5, Top: 1.4, Width: 9.0, Height: 5.5
-        # Bu koordinatalar matnni slayd ichida ushlab turadi
-        bbox = slide.shapes.add_textbox(PptxInches(0.5), PptxInches(1.4), PptxInches(9.0), PptxInches(5.6))
-        tf = bbox.text_frame
-        tf.word_wrap = True
+        bbox = slide.shapes.add_textbox(PptxInches(0.5), PptxInches(1.4), PptxInches(9.0), PptxInches(5.5))
+        tf = bbox.text_frame; tf.word_wrap = True
         
         content = s_data.get("content", "")
-        # Avto-shrift (Sig'dirish uchun)
         char_count = len(content)
         if char_count > 1200: font_size = 10
         elif char_count > 900: font_size = 11
-        elif char_count > 700: font_size = 12
-        elif char_count > 500: font_size = 14
-        else: font_size = 16
+        elif char_count > 600: font_size = 12
+        else: font_size = 14
         
         paragraphs = content.split('\n')
         for para in paragraphs:
-            if len(para.strip()) > 2:
-                # Bullet point belgisi (•) bilan
+            if len(para.strip()) > 3:
                 add_pptx_markdown_text(tf, "• " + para.strip(), font_size, th["txt"], "Arial")
 
     out = BytesIO(); prs.save(out); out.seek(0)
@@ -340,7 +372,6 @@ def create_document(full_text_data, title_info, doc_type="Referat"):
     ip = doc.add_paragraph(); ip.paragraph_format.left_indent = Cm(9)
     def al(k, v):
         if v and v != "-": r = ip.add_run(f"{k}: {v}\n"); set_font_style(r, 14, k in ["Bajardi", "Qabul qildi"])
-    
     al("Bajardi", title_info['student'])
     al("Guruh", title_info.get('group'))
     al("Yo'nalish", title_info.get('direction'))
@@ -523,7 +554,7 @@ async def cancel(m: types.Message, state: FSMContext): await state.clear(); awai
 @router.message(F.text.in_(["📊 Taqdimot", "📝 Mustaqil ish", "📑 Referat"]))
 async def st_gen(m: types.Message, state: FSMContext):
     u = await get_or_create_user(m.from_user.id, m.from_user.username, m.from_user.full_name)
-    if u and u[6] == 1: await m.answer("🚫 Bloklangansiz."); return
+    if u['is_blocked']: await m.answer("🚫 Bloklangansiz."); return
     doc = "taqdimot" if "Taqdimot" in m.text else "referat"
     await state.update_data(doc_type=doc)
     await m.answer("📝 <b>Mavzuni kiriting:</b>", parse_mode="HTML", reply_markup=cancel_kb)
@@ -578,27 +609,35 @@ async def proc(c: CallbackQuery, state: FSMContext):
     await c.message.delete()
     try:
         parts = c.data.split("_"); pages, cost = int(parts[1]), int(parts[2])
-        uid = c.from_user.id; 
+        uid = c.from_user.id
+        
         user = await get_or_create_user(uid, c.from_user.username, c.from_user.full_name)
         data = await state.get_data()
-        
         doc_type = data['doc_type']
-        free_col = "free_pptx" if doc_type == "taqdimot" else "free_docx"
-        limit = user[4] if doc_type == "taqdimot" else user[5]
-
+        
+        # Check balance/limit
+        free_limit = user['free_pptx'] if doc_type == "taqdimot" else user['free_docx']
+        balance = user['balance']
+        
         used_free = False
-        if limit > 0: used_free = True; msg = await c.message.answer(f"⏳ <b>Boshlandi...</b>\n🎁 Bepul limit: {limit-1}", parse_mode="HTML")
-        elif user[3] >= cost: msg = await c.message.answer(f"⏳ <b>Boshlandi...</b>\n💳 Balansdan: {cost}", parse_mode="HTML")
-        else: await c.message.answer(f"❌ Mablag' yetarli emas!\nSizda: {user[3]}", reply_markup=main_menu); await state.clear(); return
+        if free_limit > 0:
+            used_free = True
+            msg = await c.message.answer(f"⏳ <b>Tayyorlanmoqda...</b>\n🎁 Bepul limit ishlatilmoqda. Qoldi: {free_limit-1}", parse_mode="HTML")
+        elif balance >= cost:
+            msg = await c.message.answer(f"⏳ <b>Tayyorlanmoqda...</b>\n💳 Hisobingizdan {cost} so'm yechiladi.", parse_mode="HTML")
+        else:
+            await c.message.answer(f"❌ <b>Mablag' yetarli emas!</b>\n\nNarxi: {cost} so'm\nSizda: {balance} so'm", reply_markup=main_menu)
+            await state.clear()
+            return
 
         res = await generate_groq_content(data['topic'], pages, doc_type, data.get('custom_plan'), msg)
-        if not res: await msg.delete(); await c.message.answer("❌ Xatolik yuz berdi. Iltimos keyinroq urinib ko'ring.", reply_markup=main_menu); await state.clear(); return
+        if not res: await msg.delete(); await c.message.answer("❌ Xatolik yuz berdi.", reply_markup=main_menu); await state.clear(); return
 
         info = {k: data.get(k, "-") for k in ['topic','student','edu_place','direction','group','subject','teacher']}
         if doc_type == "taqdimot": f = create_presentation(res, info, data['design']); ext, cap = "pptx", "✅ Taqdimot tayyor!"
         else: f = create_document(res, info, "Referat" if doc_type=="referat" else "Mustaqil Ish"); ext, cap = "docx", "✅ Hujjat tayyor!"
 
-        if used_free: await update_limit(uid, free_col, -1)
+        if used_free: await update_limit(uid, "free_pptx" if doc_type == "taqdimot" else "free_docx", -1)
         else: await update_balance(uid, -cost)
 
         await msg.delete()
@@ -642,7 +681,9 @@ async def adm_hist(c: CallbackQuery):
     await c.answer()
     d, m, t, l50 = await get_financial_report()
     msg = f"📈 <b>Hisobot</b>\n📆 Bugun: {d:,}\n📅 Oy: {m:,}\n💰 Jami: {t:,}\n\n📜 <b>Oxirgi 50 ta:</b>\n"
-    for dt, nm, uid, am in l50: msg += f"🔹 {dt[5:16]} | {nm[:10]} ({uid}) | {am:,}\n"
+    for r in l50:
+        # Postgres returns Record objects, access by key/index
+        msg += f"🔹 {r['date'][5:16]} | {r['full_name'][:10]} ({r['user_id']}) | {r['amount']:,}\n"
     if len(msg) > 4000: msg = msg[:4000] + "..."
     kb = InlineKeyboardBuilder().button(text="🔙", callback_data="adm_back").as_markup(); await c.message.edit_text(msg, parse_mode="HTML", reply_markup=kb)
 @router.callback_query(F.data == "adm_back", IsAdmin())
@@ -666,8 +707,11 @@ async def adm_spr(m: types.Message, state: FSMContext):
 async def abal(c: CallbackQuery, state: FSMContext): await c.message.answer("User ID:", reply_markup=cancel_kb); await state.set_state(AdminState.balance_id)
 @router.message(AdminState.balance_id)
 async def abal_id(m: types.Message, state: FSMContext):
-    try: uid=int(m.text); u=await get_user(uid); await state.update_data(t_uid=uid); await m.answer(f"User: {u[2]}\nSumma (+/-):"); await state.set_state(AdminState.balance_amount)
-    except: await m.answer("ID yozing")
+    try: uid=int(m.text); u=await get_user(uid);
+    except: u=None
+    if not u: await m.answer("User topilmadi"); return
+    await state.update_data(t_uid=uid); await m.answer(f"User: {u['full_name']} ({u['balance']})\nSumma (+/-):"); await state.set_state(AdminState.balance_amount)
+
 @router.message(AdminState.balance_amount)
 async def abal_amt(m: types.Message, state: FSMContext):
     try: amt=int(m.text); d=await state.get_data(); await update_balance(d['t_uid'], amt); await m.answer("✅ OK", reply_markup=admin_kb()); await state.clear()
@@ -676,7 +720,7 @@ async def abal_amt(m: types.Message, state: FSMContext):
 @router.message(F.text == "💰 Mening hisobim")
 async def acc(m: types.Message):
     u = await get_or_create_user(m.from_user.id, m.from_user.username, m.from_user.full_name)
-    await m.answer(f"👤 {u[2]}\n🆔 <code>{u[0]}</code>\n💰 {u[3]:,} so'm\n🎁 PPTX: {u[4]} | DOCX: {u[5]}", parse_mode="HTML")
+    await m.answer(f"👤 {u['full_name']}\n🆔 <code>{u['user_id']}</code>\n💰 {u['balance']:,} so'm\n🎁 PPTX: {u['free_pptx']} | DOCX: {u['free_docx']}", parse_mode="HTML")
 
 @router.message(F.text == "💳 To'lov qilish")
 async def pay(m: types.Message):
@@ -715,7 +759,7 @@ async def adm_de(c: CallbackQuery):
 @router.message(F.text == "📂 Namunalar")
 async def samp(m: types.Message):
     s = await get_all_samples()
-    for f, c, _ in s: await m.answer_document(f, caption=c)
+    for r in s: await m.answer_document(r['file_id'], caption=r['caption'])
 
 @router.message(F.text == "📞 Yordam")
 async def hlp(m: types.Message): await m.answer(f"Admin: @{ADMIN_USERNAME}")
@@ -781,7 +825,7 @@ async def main():
     bot = Bot(token=BOT_TOKEN)
     dp = Dispatcher(storage=MemoryStorage())
     dp.include_router(router)
-    print("Bot ishladi (Fixed Render Data Path)...")
+    print("Bot ishladi (Postgres + Fix)...")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
