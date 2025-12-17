@@ -17,7 +17,8 @@ except ImportError:
     pass
 
 from aiogram import Bot, Dispatcher, F, types, Router
-from aiogram.filters import CommandStart, Filter
+# --- TUZATILDI: 'Command' qo'shildi ---
+from aiogram.filters import CommandStart, Command, Filter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
@@ -655,6 +656,7 @@ async def gen_proc(c: CallbackQuery, state: FSMContext):
     await state.clear()
 
 # --- ADMIN PANEL ---
+# --- TUZATILDI: Command bu yerda ishlatilgan edi ---
 @router.message(Command("admin"))
 async def adm_cmd(m: types.Message):
     if await is_admin_check(m.from_user.id): await m.answer("Admin Panel", reply_markup=admin_kb())
