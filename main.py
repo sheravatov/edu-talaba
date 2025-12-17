@@ -88,7 +88,7 @@ DATABASE_URL = os.environ.get("DATABASE_URL")
 
 groq_keys_str = os.environ.get("GROQ_KEYS", "")
 GROQ_API_KEYS = groq_keys_str.split(",") if "," in groq_keys_str else [groq_keys_str]
-api_key_cycle = cycle([k for k in GROQ_API_KEYS if k]) # Bo'sh kalitlarni olib tashlash
+api_key_cycle = cycle([k for k in GROQ_API_KEYS if k])
 GROQ_MODELS = ["llama-3.3-70b-versatile"]
 
 DEFAULT_PRICES = {"pptx_10": 5000, "pptx_15": 7000, "pptx_20": 10000, "docx_15": 5000, "docx_20": 7000, "docx_25": 10000, "docx_30": 12000}
@@ -179,13 +179,6 @@ async def is_admin(uid):
 
 async def add_admin_db(uid):
     async with pool.acquire() as conn: await conn.execute("INSERT INTO admins (user_id, added_date) VALUES ($1, $2) ON CONFLICT DO NOTHING", uid, datetime.now().isoformat())
-
-async def get_stats():
-    async with pool.acquire() as conn:
-        users = await conn.fetchval("SELECT COUNT(*) FROM users")
-        income = await conn.fetchval("SELECT SUM(amount) FROM transactions")
-        files = await conn.fetchval("SELECT COUNT(*) FROM history")
-        return users, (income or 0), (files or 0)
 
 # REPORT QUERIES
 async def get_all_users_report():
@@ -388,7 +381,8 @@ skip_kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="➡�
 class Form(StatesGroup):
     type = State(); topic = State(); plan = State(); student = State(); uni = State(); fac = State(); grp = State(); subj = State(); teach = State(); design = State(); len = State(); format = State()
 class PayState(StatesGroup): screenshot = State(); amount = State()
-class AdminState(StatesGroup): bc_msg=State(); bc_id=State(); bc_text=State()
+class AdminState(StatesGroup): 
+    bc_msg=State(); bc_id=State(); bc_text=State(); add_adm=State(); price_val=State()
 
 @router.message(CommandStart())
 async def start(m: types.Message):
@@ -547,7 +541,7 @@ async def generate(c: CallbackQuery, state: FSMContext):
         if not is_free and u['balance'] < cost: 
             return await c.message.answer(f"❌ <b>Mablag' yetarli emas.</b>\nNarxi: {cost:,} so'm\nBalansingiz: {u['balance']:,} so'm", parse_mode="HTML", reply_markup=main_kb)
         
-        msg = await c.message.answer("⏳ <b>Tayyorlanmoqda...</b>\n<i>AI har bir bo'lim uchun matn yozmoqda...</i>", parse_mode="HTML")
+        msg = await c.message.answer("⏳ <b>Tayyorlanmoqda...</b>\n<i>AI matn yozmoqda, iltimos kuting...</i>", parse_mode="HTML")
         content = await generate_full_content(data['topic'], pages, data['dtype'], data['plan'], msg)
         
         if not content: return await msg.edit_text("❌ Xatolik yuz berdi. Qayta urining.")
@@ -590,6 +584,7 @@ async def admin_panel(m: types.Message):
         kb.button(text="✉️ Xabar (Hammaga)", callback_data="adm_bc_all")
         kb.button(text="✉️ Xabar (ID)", callback_data="adm_bc_one")
         kb.button(text="➕ Admin", callback_data="adm_add")
+        kb.button(text="🛠 Narxlar", callback_data="adm_price")
         kb.button(text="🚪 Yopish", callback_data="close")
         kb.adjust(2)
         await m.answer("<b>👑 ADMIN PANEL</b>\nExcel hisobotlar yuklab olish:", parse_mode="HTML", reply_markup=kb.as_markup())
@@ -665,6 +660,28 @@ async def add_adm(c: CallbackQuery, state: FSMContext):
 async def save_adm(m: types.Message, state: FSMContext):
     try: await add_admin_db(int(m.text)); await m.answer("✅ Qo'shildi.")
     except: pass
+    await state.clear()
+
+@router.callback_query(F.data == "adm_price")
+async def adm_price(c: CallbackQuery):
+    kb = InlineKeyboardBuilder()
+    for k in DEFAULT_PRICES.keys():
+        v = await get_price(k)
+        kb.button(text=f"{k} ({v})", callback_data=f"editp_{k}")
+    kb.adjust(2)
+    await c.message.edit_text("Narxni tanlang:", reply_markup=kb.as_markup())
+
+@router.callback_query(F.data.startswith("editp_"))
+async def edit_p(c: CallbackQuery, state: FSMContext):
+    key = c.data.split("_", 1)[1]
+    await state.update_data(pk=key); await c.message.answer(f"Yangi narx ({key}):"); await state.set_state(AdminState.price_val)
+
+@router.message(AdminState.price_val)
+async def set_p(m: types.Message, state: FSMContext):
+    try:
+        val = int(m.text); d = await state.get_data()
+        await set_price(d['pk'], val); await m.answer("✅ O'zgardi.")
+    except: await m.answer("Raqam yozing.")
     await state.clear()
 
 @router.callback_query(F.data == "close")
