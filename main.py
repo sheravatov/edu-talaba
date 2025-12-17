@@ -5,7 +5,8 @@ import json
 import re
 import os
 import requests
-from io import BytesIO
+import csv
+from io import BytesIO, StringIO
 from datetime import datetime
 from itertools import cycle
 
@@ -26,7 +27,7 @@ from aiogram.types import (
     BufferedInputFile, CallbackQuery
 )
 from aiogram.utils.keyboard import InlineKeyboardBuilder
-from aiogram.exceptions import TelegramForbiddenError, TelegramBadRequest
+from aiogram.exceptions import TelegramForbiddenError
 
 # --- WEB SERVER ---
 from fastapi import FastAPI
@@ -38,7 +39,7 @@ app = FastAPI()
 @app.head("/")
 @app.get("/")
 async def health_check():
-    return {"status": "Alive", "version": "V7-Admin-Ultimate"}
+    return {"status": "Alive", "version": "V8-Final-Pro"}
 
 async def run_web_server():
     port = int(os.environ.get("PORT", 8000))
@@ -68,7 +69,7 @@ DEFAULT_PRICES = {
     "docx_15": 5000, "docx_20": 7000, "docx_25": 10000, "docx_30": 12000
 }
 
-# --- DOCX/PPTX/PDF LIBS ---
+# --- LIBS ---
 from docx import Document
 from docx.shared import Pt, Cm
 from docx.enum.text import WD_ALIGN_PARAGRAPH
@@ -90,7 +91,7 @@ def check_font():
 check_font()
 
 # ==============================================================================
-# DATABASE MANAGER (YANGILANGAN)
+# DATABASE MANAGER
 # ==============================================================================
 pool = None
 async def init_db():
@@ -98,23 +99,17 @@ async def init_db():
     try:
         pool = await asyncpg.create_pool(dsn=DATABASE_URL)
         async with pool.acquire() as conn:
-            # Users jadvali (PDF ustunini qo'shamiz)
             await conn.execute("""
                 CREATE TABLE IF NOT EXISTS users (
                     user_id BIGINT PRIMARY KEY, username TEXT, full_name TEXT, 
                     balance INTEGER DEFAULT 0, 
-                    free_pptx INTEGER DEFAULT 2, 
-                    free_docx INTEGER DEFAULT 2, 
-                    free_pdf INTEGER DEFAULT 2,
-                    is_blocked INTEGER DEFAULT 0, 
-                    joined_date TEXT
+                    free_pptx INTEGER DEFAULT 2, free_docx INTEGER DEFAULT 2, free_pdf INTEGER DEFAULT 2,
+                    is_blocked INTEGER DEFAULT 0, joined_date TEXT
                 )
             """)
-            # Agar eski bazada free_pdf yo'q bo'lsa, qo'shamiz (Migration)
-            try:
-                await conn.execute("ALTER TABLE users ADD COLUMN free_pdf INTEGER DEFAULT 2")
+            try: await conn.execute("ALTER TABLE users ADD COLUMN free_pdf INTEGER DEFAULT 2")
             except: pass
-
+            
             await conn.execute("CREATE TABLE IF NOT EXISTS transactions (id SERIAL PRIMARY KEY, user_id BIGINT, amount INTEGER, date TEXT)")
             await conn.execute("CREATE TABLE IF NOT EXISTS history (id SERIAL PRIMARY KEY, user_id BIGINT, doc_type TEXT, topic TEXT, pages INTEGER, date TEXT)")
             await conn.execute("CREATE TABLE IF NOT EXISTS prices (key TEXT PRIMARY KEY, value INTEGER)")
@@ -123,10 +118,9 @@ async def init_db():
             for k, v in DEFAULT_PRICES.items():
                 await conn.execute("INSERT INTO prices (key, value) VALUES ($1, $2) ON CONFLICT (key) DO NOTHING", k, v)
             await conn.execute("INSERT INTO admins (user_id, added_date) VALUES ($1, $2) ON CONFLICT (user_id) DO NOTHING", ADMIN_ID, datetime.now().isoformat())
-            print("✅ Baza va Jadvallar (PDF) tayyor.")
-    except Exception as e: print(f"DB Init Error: {e}")
+            print("✅ Baza OK.")
+    except Exception as e: print(f"DB Error: {e}")
 
-# DB Helpers
 async def get_user(uid):
     async with pool.acquire() as conn: return await conn.fetchrow("SELECT * FROM users WHERE user_id=$1", uid)
 
@@ -141,7 +135,7 @@ async def create_user(uid, uname, fname):
 async def update_balance(uid, amount):
     async with pool.acquire() as conn: await conn.execute("UPDATE users SET balance = balance + $1 WHERE user_id = $2", amount, uid)
 
-async def update_limit(uid, col, val): # col: 'free_pptx', 'free_pdf'
+async def update_limit(uid, col, val):
     async with pool.acquire() as conn: await conn.execute(f"UPDATE users SET {col} = {col} + $1 WHERE user_id = $2", val, uid)
 
 async def add_hist(uid, dtype, topic, pages):
@@ -152,24 +146,17 @@ async def get_price(key):
         val = await conn.fetchval("SELECT value FROM prices WHERE key=$1", key)
         return val if val else DEFAULT_PRICES.get(key, 5000)
 
-async def set_price(key, val):
-    async with pool.acquire() as conn: await conn.execute("INSERT INTO prices (key, value) VALUES ($1, $2) ON CONFLICT (key) DO UPDATE SET value=$2", key, val)
-
-async def get_stats():
-    async with pool.acquire() as conn:
-        users = await conn.fetchval("SELECT COUNT(*) FROM users")
-        active = await conn.fetchval("SELECT COUNT(*) FROM users WHERE is_blocked=0")
-        income = await conn.fetchval("SELECT SUM(amount) FROM transactions")
-        files = await conn.fetchval("SELECT COUNT(*) FROM history")
-        return users, active, (income or 0), (files or 0)
-
 async def is_admin(uid):
     async with pool.acquire() as conn:
         res = await conn.fetchval("SELECT user_id FROM admins WHERE user_id=$1", uid)
         return res is not None or uid == ADMIN_ID
 
+async def get_all_users_data():
+    async with pool.acquire() as conn:
+        return await conn.fetch("SELECT user_id, full_name, username, balance, joined_date FROM users ORDER BY joined_date DESC")
+
 # ==============================================================================
-# ENGINES (PPTX, DOCX, PDF)
+# ENGINES
 # ==============================================================================
 def clean_text(text):
     text = text.replace("**", "").replace("##", "").replace("###", "")
@@ -340,7 +327,7 @@ skip_kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="➡�
 class Form(StatesGroup):
     type = State(); topic = State(); plan = State(); student = State(); uni = State(); fac = State(); grp = State(); subj = State(); teach = State(); design = State(); len = State(); format = State()
 class PayState(StatesGroup): screenshot = State(); amount = State()
-class AdminState(StatesGroup): bc_msg=State(); price_val=State(); price_key=State(); add_adm=State(); find_u=State(); edit_bal=State()
+class AdminState(StatesGroup): bc_msg=State(); bc_id=State(); bc_text=State()
 
 @router.message(CommandStart())
 async def start(m: types.Message):
@@ -361,7 +348,8 @@ async def help_cmd(m: types.Message):
         "• <b>Referat/Mustaqil ish:</b> Word (DOCX) yoki PDF formatda.\n\n"
         "💎 <b>To'lov va Limitlar:</b>\n"
         "• Har bir yangi foydalanuvchiga 2 tadan bepul urinish beriladi.\n"
-        "• Limit tugasa, 'To'lov qilish' bo'limi orqali hisobni to'ldiring.\n\n"
+        "• Limit tugasa, 'To'lov qilish' bo'limi orqali hisobni to'ldiring.\n"
+        "• PDF ham yaratib beradi!\n\n"
         f"👨‍💻 <b>Admin:</b> @{ADMIN_USERNAME}"
     )
     await m.answer(txt, parse_mode="HTML", reply_markup=main_kb)
@@ -370,9 +358,7 @@ async def help_cmd(m: types.Message):
 async def balance(m: types.Message):
     u = await get_user(m.from_user.id)
     if u: 
-        # Agar eski bazada free_pdf yo'q bo'lsa, xato bermasligi uchun get() ishlatamiz
-        pdf_limit = u.get('free_pdf', 0) 
-        await m.answer(f"👤 <b>{u['full_name']}</b>\n🆔 ID: <code>{u['user_id']}</code>\n\n💰 <b>Balans:</b> {u['balance']:,} so'm\n\n🎁 <b>Bepul limitlar:</b>\n📄 DOCX (Word): <b>{u['free_docx']}</b> ta\n📑 PDF (Fayl): <b>{pdf_limit}</b> ta\n📊 PPTX (Slayd): <b>{u['free_pptx']}</b> ta", parse_mode="HTML")
+        await m.answer(f"👤 <b>{u['full_name']}</b>\n🆔 ID: <code>{u['user_id']}</code>\n\n💰 <b>Balans:</b> {u['balance']:,} so'm\n\n🎁 <b>Bepul limitlar:</b>\n📄 DOCX (Word): <b>{u['free_docx']}</b> ta\n📑 PDF (Fayl): <b>{u.get('free_pdf', 0)}</b> ta\n📊 PPTX (Slayd): <b>{u['free_pptx']}</b> ta", parse_mode="HTML")
 
 # PAYMENT
 @router.message(F.text == "💳 To'lov qilish")
@@ -401,7 +387,6 @@ async def pay_check(m: types.Message, state: FSMContext):
 async def approve(c: CallbackQuery):
     _, uid, amt = c.data.split("_"); uid=int(uid); amt=int(amt)
     await update_balance(uid, amt); 
-    # Transaction jadvaliga yozish (agar mavjud bo'lsa)
     async with pool.acquire() as conn: await conn.execute("INSERT INTO transactions (user_id, amount, date) VALUES ($1, $2, $3)", uid, amt, datetime.now().strftime("%Y-%m-%d %H:%M"))
     await c.message.edit_caption(caption=c.message.caption + "\n\n✅ <b>QABUL QILINDI</b>", parse_mode="HTML")
     try: await c.bot.send_message(uid, f"✅ <b>To'lov qabul qilindi!</b>\nHisobingizga {amt:,} so'm tushdi.", parse_mode="HTML")
@@ -533,111 +518,69 @@ async def generate(c: CallbackQuery, state: FSMContext):
         await c.message.answer("Texnik xatolik.", reply_markup=main_kb)
     await state.clear()
 
-# --- ADMIN PANEL (ULTIMATE) ---
+# --- ADMIN PANEL (ULTIMATE V2) ---
 @router.message(Command("admin"))
 async def admin_panel(m: types.Message):
     if await is_admin(m.from_user.id):
         kb = InlineKeyboardBuilder()
-        kb.button(text="📊 Statistika", callback_data="adm_stats")
-        kb.button(text="👥 Foydalanuvchi", callback_data="adm_users")
-        kb.button(text="✉️ Xabar", callback_data="adm_bc")
-        kb.button(text="🛠 Narxlar", callback_data="adm_price")
-        kb.button(text="➕ Admin", callback_data="adm_add")
+        kb.button(text="👥 Foydalanuvchilar (Excel)", callback_data="adm_dl_users")
+        kb.button(text="✉️ Xabar (Hammaga)", callback_data="adm_bc_all")
+        kb.button(text="✉️ Xabar (Bitta odamga)", callback_data="adm_bc_one")
         kb.button(text="🚪 Yopish", callback_data="close")
-        kb.adjust(2)
-        await m.answer("<b>👑 ADMIN PANEL</b>\nBoshqaruv markaziga xush kelibsiz.", parse_mode="HTML", reply_markup=kb.as_markup())
+        kb.adjust(1)
+        await m.answer("<b>👑 ADMIN PANEL</b>\nTanlang:", parse_mode="HTML", reply_markup=kb.as_markup())
 
-@router.callback_query(F.data == "adm_stats")
-async def adm_stats(c: CallbackQuery):
-    t, a, i, d = await get_stats()
-    txt = (f"📊 <b>STATISTIKA</b>\n\n"
-           f"👥 Jami: <b>{t}</b>\n"
-           f"✅ Aktiv: <b>{a}</b>\n"
-           f"💰 Tushum: <b>{i:,}</b> so'm\n"
-           f"📂 Fayllar: <b>{d}</b> ta")
-    await c.message.edit_text(txt, parse_mode="HTML", reply_markup=c.message.reply_markup)
+# 1. EXCEL YUKLASH (HAMMA USERLAR)
+@router.callback_query(F.data == "adm_dl_users")
+async def adm_dl_users(c: CallbackQuery):
+    await c.message.answer("⏳ Fayl tayyorlanmoqda...")
+    users = await get_all_users_data()
+    
+    # CSV yaratish
+    output = StringIO()
+    writer = csv.writer(output)
+    writer.writerow(["ID", "Ism", "Username", "Balans", "Qo'shilgan sana"])
+    for u in users:
+        writer.writerow([u['user_id'], u['full_name'], u['username'], u['balance'], u['joined_date']])
+    
+    output.seek(0)
+    # Stringni baytga o'tkazish (Telegram uchun)
+    file_bytes = output.getvalue().encode('utf-8')
+    await c.message.answer_document(BufferedInputFile(file_bytes, filename="users.csv"), caption="📄 Barcha foydalanuvchilar ro'yxati.")
 
-@router.callback_query(F.data == "adm_users")
-async def adm_users(c: CallbackQuery, state: FSMContext):
-    await c.message.answer("🔎 Foydalanuvchi ID raqamini yozing:", reply_markup=cancel_kb); await state.set_state(AdminState.find_u)
-
-@router.message(AdminState.find_u)
-async def find_user_res(m: types.Message, state: FSMContext):
-    try:
-        uid = int(m.text)
-        u = await get_user(uid)
-        if u:
-            txt = (f"👤 <b>{u['full_name']}</b>\n"
-                   f"🆔 <code>{u['user_id']}</code>\n"
-                   f"💰 Balans: {u['balance']}\n"
-                   f"📄 DOCX: {u['free_docx']} | 📊 PPTX: {u['free_pptx']} | 📑 PDF: {u.get('free_pdf', 0)}")
-            kb = InlineKeyboardBuilder()
-            kb.button(text="💰 Balans o'zgartirish", callback_data=f"ebal_{uid}")
-            kb.adjust(1)
-            await m.answer(txt, parse_mode="HTML", reply_markup=kb.as_markup())
-        else: await m.answer("Topilmadi.")
-    except: await m.answer("ID raqam bo'lishi kerak.")
-    await state.clear()
-
-@router.callback_query(F.data.startswith("ebal_"))
-async def edit_balance_init(c: CallbackQuery, state: FSMContext):
-    uid = c.data.split("_")[1]
-    await state.update_data(uid=uid)
-    await c.message.answer("Qancha summa qo'shmoqchisiz (yoki ayirmoqchisiz -):", reply_markup=cancel_kb)
-    await state.set_state(AdminState.edit_bal)
-
-@router.message(AdminState.edit_bal)
-async def edit_balance_do(m: types.Message, state: FSMContext):
-    try:
-        amt = int(m.text)
-        d = await state.get_data()
-        await update_balance(int(d['uid']), amt)
-        await m.answer("✅ Balans yangilandi.", reply_markup=main_kb)
-    except: await m.answer("Xato.")
-    await state.clear()
-
-@router.callback_query(F.data == "adm_bc")
-async def adm_bc(c: CallbackQuery, state: FSMContext):
-    await c.message.answer("✉️ Xabar matnini yuboring (Rasm, Video, Text):", reply_markup=cancel_kb); await state.set_state(AdminState.bc_msg)
+# 2. HAMMAGA XABAR
+@router.callback_query(F.data == "adm_bc_all")
+async def adm_bc_all(c: CallbackQuery, state: FSMContext):
+    await c.message.answer("✉️ Hammaga yuboriladigan xabarni kiriting:", reply_markup=cancel_kb); await state.set_state(AdminState.bc_msg)
 
 @router.message(AdminState.bc_msg)
-async def send_bc(m: types.Message, state: FSMContext):
+async def send_bc_all(m: types.Message, state: FSMContext):
     await m.answer("🚀 Yuborilmoqda...")
     async with pool.acquire() as conn:
         users = await conn.fetch("SELECT user_id FROM users")
         s, f = 0, 0
         for u in users:
             try: await m.copy_to(u['user_id']); s+=1; await asyncio.sleep(0.05)
-            except TelegramForbiddenError: f+=1 # Bloklaganlar
-            except: pass
-    await m.answer(f"✅ Yuborildi: {s} ta\n❌ Bloklagan: {f} ta", reply_markup=main_kb); await state.clear()
+            except: f+=1
+    await m.answer(f"✅ Yuborildi: {s}\n❌ Yetib bormadi: {f}", reply_markup=main_kb); await state.clear()
 
-@router.callback_query(F.data == "adm_price")
-async def adm_price(c: CallbackQuery):
-    kb = InlineKeyboardBuilder()
-    for k in DEFAULT_PRICES.keys():
-        v = await get_price(k)
-        kb.button(text=f"{k} ({v})", callback_data=f"editp_{k}")
-    kb.adjust(2); kb.row(InlineKeyboardButton(text="🔙", callback_data="close"))
-    await c.message.edit_text("Narxni tanlang:", reply_markup=kb.as_markup())
+# 3. BITTA ODAMGA XABAR
+@router.callback_query(F.data == "adm_bc_one")
+async def adm_bc_one(c: CallbackQuery, state: FSMContext):
+    await c.message.answer("👤 Foydalanuvchi ID raqamini yozing:", reply_markup=cancel_kb); await state.set_state(AdminState.bc_id)
 
-@router.callback_query(F.data.startswith("editp_"))
-async def edit_p(c: CallbackQuery, state: FSMContext):
-    key = c.data.split("_", 1)[1]
-    await state.update_data(pk=key); await c.message.answer(f"Yangi narx ({key}):"); await state.set_state(AdminState.price_val)
+@router.message(AdminState.bc_id)
+async def get_bc_id(m: types.Message, state: FSMContext):
+    await state.update_data(tid=int(m.text))
+    await m.answer("✉️ Xabarni yozing:"); await state.set_state(AdminState.bc_text)
 
-@router.message(AdminState.price_val)
-async def set_p(m: types.Message, state: FSMContext):
-    try: val = int(m.text); d = await state.get_data(); await set_price(d['pk'], val); await m.answer("✅ Narx o'zgardi.")
-    except: await m.answer("Raqam yozing.")
-    await state.clear()
-
-@router.callback_query(F.data == "adm_add")
-async def add_adm(c: CallbackQuery, state: FSMContext): await c.message.answer("Yangi Admin ID:"); await state.set_state(AdminState.add_adm)
-@router.message(AdminState.add_adm)
-async def save_adm(m: types.Message, state: FSMContext):
-    try: await add_admin_db(int(m.text)); await m.answer("✅ Admin qo'shildi.")
-    except: pass
+@router.message(AdminState.bc_text)
+async def send_bc_one(m: types.Message, state: FSMContext):
+    d = await state.get_data()
+    try:
+        await m.copy_to(d['tid'])
+        await m.answer("✅ Xabar yuborildi.", reply_markup=main_kb)
+    except: await m.answer("❌ Xatolik. ID noto'g'ri yoki bot bloklangan.")
     await state.clear()
 
 @router.callback_query(F.data == "close")
