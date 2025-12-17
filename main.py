@@ -4,12 +4,12 @@ import sys
 import json
 import re
 import os
-import random
+import requests
 from io import BytesIO
 from datetime import datetime
 from itertools import cycle
 
-# --- ENV SOZLAMALARI ---
+# --- ENV ---
 try:
     from dotenv import load_dotenv
     load_dotenv()
@@ -17,7 +17,6 @@ except ImportError:
     pass
 
 from aiogram import Bot, Dispatcher, F, types, Router
-# --- TUZATILDI: 'Command' qo'shildi ---
 from aiogram.filters import CommandStart, Command, Filter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -28,18 +27,17 @@ from aiogram.types import (
 )
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-# --- RENDER WEB SERVER (ULTIMATE ROBOT UCHUN) ---
+# --- WEB SERVER (UPTIMEROBOT UCHUN) ---
 from fastapi import FastAPI
 import uvicorn
 import asyncpg
 
 app = FastAPI()
 
-# MUHIM: 405 xatosini yo'qotish uchun HEAD va GET ikkalasini ham qo'shamiz
 @app.head("/")
 @app.get("/")
 async def health_check():
-    return {"status": "Alive", "version": "Ultimate-Pro-Fixed"}
+    return {"status": "Alive", "version": "V6-Final-Pro"}
 
 async def run_web_server():
     port = int(os.environ.get("PORT", 8000))
@@ -47,10 +45,8 @@ async def run_web_server():
     server = uvicorn.Server(config)
     await server.serve()
 
-# --- OPENAI (GROQ) ---
+# --- CONFIG & KEYS ---
 from openai import AsyncOpenAI
-
-# 1. KONFIGURATSIYA
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 ADMIN_ID = int(os.environ.get("ADMIN_ID", 0))
 ADMIN_USERNAME = os.environ.get("ADMIN_USERNAME", "admin")
@@ -58,15 +54,14 @@ BOT_USERNAME = os.environ.get("BOT_USERNAME", "bot")
 KARTA_RAQAMI = os.environ.get("KARTA_RAQAMI", "8600 0000 0000 0000")
 DATABASE_URL = os.environ.get("DATABASE_URL")
 
-# API KEYS
+# API Keys Rotatsiyasi
 groq_keys_str = os.environ.get("GROQ_KEYS", "")
 if "," in groq_keys_str:
     GROQ_API_KEYS = groq_keys_str.split(",")
 else:
     GROQ_API_KEYS = [groq_keys_str] if groq_keys_str else ["dummy_key"]
-
 api_key_cycle = cycle(GROQ_API_KEYS)
-GROQ_MODELS = ["llama-3.3-70b-versatile", "llama-3.1-8b-instant"]
+GROQ_MODELS = ["llama-3.3-70b-versatile"] # Eng kuchli model
 
 DEFAULT_PRICES = {
     "pptx_10": 5000, "pptx_15": 7000, "pptx_20": 10000,
@@ -75,715 +70,598 @@ DEFAULT_PRICES = {
 
 # --- LIBRARIES ---
 from docx import Document
-from docx.shared import Pt, Cm
+from docx.shared import Pt, Cm, Inches, RGBColor
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from pptx import Presentation
 from pptx.util import Pt as PptxPt, Inches as PptxInches
 from pptx.dml.color import RGBColor as PptxRGB
 from pptx.enum.shapes import MSO_SHAPE
+from pptx.enum.text import PP_ALIGN
+from fpdf import FPDF
+
+# FONT YUKLASH (PDF UCHUN MUHIM)
+FONT_PATH = "DejaVuSans.ttf"
+def check_font():
+    if not os.path.exists(FONT_PATH):
+        print("⏳ Font yuklanmoqda...")
+        try:
+            # Ishonchli manba
+            url = "https://raw.githubusercontent.com/coreybutler/fonts/master/ttf/DejaVuSans.ttf"
+            r = requests.get(url, timeout=15)
+            with open(FONT_PATH, 'wb') as f:
+                f.write(r.content)
+            print("✅ Font yuklandi.")
+        except Exception as e:
+            print(f"❌ Font xatosi: {e}")
+check_font()
 
 # ==============================================================================
-# 2. DATABASE (PostgreSQL)
+# DATABASE MANAGER
 # ==============================================================================
 pool = None
-
 async def init_db():
     global pool
     try:
         pool = await asyncpg.create_pool(dsn=DATABASE_URL)
         async with pool.acquire() as conn:
-            # Users
-            await conn.execute("""
-                CREATE TABLE IF NOT EXISTS users (
-                    user_id BIGINT PRIMARY KEY,
-                    username TEXT,
-                    full_name TEXT,
-                    balance INTEGER DEFAULT 0,
-                    free_pptx INTEGER DEFAULT 5,
-                    free_docx INTEGER DEFAULT 5,
-                    is_blocked INTEGER DEFAULT 0,
-                    joined_date TEXT
-                )
-            """)
-            # Transactions
-            await conn.execute("""
-                CREATE TABLE IF NOT EXISTS transactions (
-                    id SERIAL PRIMARY KEY,
-                    user_id BIGINT,
-                    amount INTEGER,
-                    date TEXT
-                )
-            """)
-            # NEW: Generation History (Admin ko'rishi uchun)
-            await conn.execute("""
-                CREATE TABLE IF NOT EXISTS history (
-                    id SERIAL PRIMARY KEY,
-                    user_id BIGINT,
-                    doc_type TEXT,
-                    topic TEXT,
-                    pages INTEGER,
-                    date TEXT
-                )
-            """)
-            # Samples
-            await conn.execute("""
-                CREATE TABLE IF NOT EXISTS samples (
-                    id SERIAL PRIMARY KEY,
-                    file_id TEXT,
-                    caption TEXT,
-                    file_type TEXT
-                )
-            """)
-            # Prices
-            await conn.execute("""
-                CREATE TABLE IF NOT EXISTS prices (
-                    key TEXT PRIMARY KEY,
-                    value INTEGER
-                )
-            """)
-            # Admins
-            await conn.execute("""
-                CREATE TABLE IF NOT EXISTS admins (
-                    user_id BIGINT PRIMARY KEY,
-                    added_date TEXT
-                )
-            """)
+            await conn.execute("CREATE TABLE IF NOT EXISTS users (user_id BIGINT PRIMARY KEY, username TEXT, full_name TEXT, balance INTEGER DEFAULT 0, free_pptx INTEGER DEFAULT 2, free_docx INTEGER DEFAULT 2, is_blocked INTEGER DEFAULT 0, joined_date TEXT)")
+            await conn.execute("CREATE TABLE IF NOT EXISTS transactions (id SERIAL PRIMARY KEY, user_id BIGINT, amount INTEGER, date TEXT)")
+            await conn.execute("CREATE TABLE IF NOT EXISTS history (id SERIAL PRIMARY KEY, user_id BIGINT, doc_type TEXT, topic TEXT, pages INTEGER, date TEXT)")
+            await conn.execute("CREATE TABLE IF NOT EXISTS prices (key TEXT PRIMARY KEY, value INTEGER)")
+            await conn.execute("CREATE TABLE IF NOT EXISTS admins (user_id BIGINT PRIMARY KEY, added_date TEXT)")
             
-            # Default Data
+            # Default narxlar
             for k, v in DEFAULT_PRICES.items():
                 await conn.execute("INSERT INTO prices (key, value) VALUES ($1, $2) ON CONFLICT (key) DO NOTHING", k, v)
-            
-            await conn.execute("INSERT INTO admins (user_id, added_date) VALUES ($1, $2) ON CONFLICT (user_id) DO NOTHING", 
-                               ADMIN_ID, datetime.now().isoformat())
-            print("✅ Baza ulandi va jadvallar tekshirildi.")
+            # Admin qo'shish
+            await conn.execute("INSERT INTO admins (user_id, added_date) VALUES ($1, $2) ON CONFLICT (user_id) DO NOTHING", ADMIN_ID, datetime.now().isoformat())
+            print("✅ Baza ulandi.")
     except Exception as e:
         print(f"❌ Baza xatosi: {e}")
 
-# --- DB FUNCTIONS ---
-async def get_or_create_user(user_id, username, full_name):
-    async with pool.acquire() as conn:
-        user = await conn.fetchrow("SELECT * FROM users WHERE user_id = $1", user_id)
-        if user:
-            # Ism o'zgargan bo'lsa yangilash
-            if user['full_name'] != full_name:
-                await conn.execute("UPDATE users SET full_name=$1, username=$2 WHERE user_id=$3", full_name, username, user_id)
-            return user
-        else:
-            await conn.execute(
-                "INSERT INTO users (user_id, username, full_name, free_pptx, free_docx, is_blocked, joined_date) VALUES ($1, $2, $3, 5, 5, 0, $4)",
-                user_id, username, full_name, datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            )
-            return await conn.fetchrow("SELECT * FROM users WHERE user_id = $1", user_id)
-
 async def get_user(user_id):
+    async with pool.acquire() as conn: return await conn.fetchrow("SELECT * FROM users WHERE user_id=$1", user_id)
+
+async def create_user(user_id, username, full_name):
     async with pool.acquire() as conn:
-        return await conn.fetchrow("SELECT * FROM users WHERE user_id = $1", user_id)
+        await conn.execute("INSERT INTO users (user_id, username, full_name, free_pptx, free_docx, is_blocked, joined_date) VALUES ($1, $2, $3, 2, 2, 0, $4) ON CONFLICT (user_id) DO UPDATE SET full_name=$3, username=$2", user_id, username, full_name, datetime.now().strftime("%Y-%m-%d"))
 
 async def update_balance(user_id, amount):
-    async with pool.acquire() as conn:
-        await conn.execute("UPDATE users SET balance = balance + $1 WHERE user_id = $2", amount, user_id)
+    async with pool.acquire() as conn: await conn.execute("UPDATE users SET balance = balance + $1 WHERE user_id = $2", amount, user_id)
 
-async def add_transaction(user_id, amount):
-    async with pool.acquire() as conn:
-        await conn.execute("INSERT INTO transactions (user_id, amount, date) VALUES ($1, $2, $3)", 
-                           user_id, amount, datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+async def add_tx(user_id, amount):
+    async with pool.acquire() as conn: await conn.execute("INSERT INTO transactions (user_id, amount, date) VALUES ($1, $2, $3)", user_id, amount, datetime.now().strftime("%Y-%m-%d %H:%M"))
 
-async def add_generation_log(user_id, doc_type, topic, pages):
-    """Foydalanish tarixini saqlash"""
-    async with pool.acquire() as conn:
-        await conn.execute(
-            "INSERT INTO history (user_id, doc_type, topic, pages, date) VALUES ($1, $2, $3, $4, $5)",
-            user_id, doc_type, topic, pages, datetime.now().strftime("%Y-%m-%d %H:%M")
-        )
+async def add_hist(user_id, dtype, topic, pages):
+    async with pool.acquire() as conn: await conn.execute("INSERT INTO history (user_id, doc_type, topic, pages, date) VALUES ($1, $2, $3, $4, $5)", user_id, dtype, topic, pages, datetime.now().strftime("%Y-%m-%d %H:%M"))
 
-async def update_limit(user_id, doc_type, amount):
-    async with pool.acquire() as conn:
-        query = f"UPDATE users SET {doc_type} = {doc_type} + $1 WHERE user_id = $2"
-        await conn.execute(query, amount, user_id)
-
-async def toggle_block_user(user_id, block=True):
-    async with pool.acquire() as conn:
-        await conn.execute("UPDATE users SET is_blocked = $1 WHERE user_id = $2", 1 if block else 0, user_id)
-
-async def get_all_users_ids():
-    async with pool.acquire() as conn:
-        rows = await conn.fetch("SELECT user_id FROM users")
-        return [r['user_id'] for r in rows]
-
-async def add_sample_db(file_id, caption, file_type):
-    async with pool.acquire() as conn:
-        await conn.execute("INSERT INTO samples (file_id, caption, file_type) VALUES ($1, $2, $3)", file_id, caption, file_type)
-
-async def get_all_samples():
-    async with pool.acquire() as conn:
-        return await conn.fetch("SELECT file_id, caption, file_type FROM samples")
+async def update_limit(user_id, col, val):
+    async with pool.acquire() as conn: await conn.execute(f"UPDATE users SET {col} = {col} + $1 WHERE user_id = $2", val, user_id)
 
 async def get_price(key):
-    async with pool.acquire() as conn:
-        val = await conn.fetchval("SELECT value FROM prices WHERE key = $1", key)
+    async with pool.acquire() as conn: 
+        val = await conn.fetchval("SELECT value FROM prices WHERE key=$1", key)
         return val if val else DEFAULT_PRICES.get(key, 5000)
 
-async def set_price(key, value):
-    async with pool.acquire() as conn:
-        await conn.execute("INSERT INTO prices (key, value) VALUES ($1, $2) ON CONFLICT (key) DO UPDATE SET value = $2", key, value)
+async def set_price(key, val):
+    async with pool.acquire() as conn: await conn.execute("INSERT INTO prices (key, value) VALUES ($1, $2) ON CONFLICT (key) DO UPDATE SET value=$2", key, val)
 
-# --- ADMIN FUNCTIONS ---
-async def add_admin_db(user_id):
+async def is_admin(uid):
     async with pool.acquire() as conn:
-        try:
-            await conn.execute("INSERT INTO admins (user_id, added_date) VALUES ($1, $2) ON CONFLICT (user_id) DO NOTHING", 
-                               user_id, datetime.now().isoformat())
-            return True
-        except: return False
+        res = await conn.fetchval("SELECT user_id FROM admins WHERE user_id=$1", uid)
+        return res is not None or uid == ADMIN_ID
 
-async def remove_admin_db(user_id):
-    if user_id == ADMIN_ID: return False
+async def add_admin_db(uid):
+    async with pool.acquire() as conn: await conn.execute("INSERT INTO admins (user_id, added_date) VALUES ($1, $2) ON CONFLICT DO NOTHING", uid, datetime.now().isoformat())
+
+async def get_stats():
     async with pool.acquire() as conn:
-        await conn.execute("DELETE FROM admins WHERE user_id = $1", user_id)
-        return True
-
-async def get_all_admins():
-    async with pool.acquire() as conn:
-        rows = await conn.fetch("SELECT user_id FROM admins")
-        return [r['user_id'] for r in rows]
-
-async def is_admin_check(user_id):
-    admins = await get_all_admins()
-    return user_id in admins or user_id == ADMIN_ID
-
-async def get_stats_data():
-    async with pool.acquire() as conn:
-        total = await conn.fetchval("SELECT COUNT(*) FROM users")
-        blocked = await conn.fetchval("SELECT COUNT(*) FROM users WHERE is_blocked = 1")
-        today = datetime.now().strftime("%Y-%m-%d")
-        new_users = await conn.fetchval("SELECT COUNT(*) FROM users WHERE joined_date LIKE $1", f"{today}%")
-        income = await conn.fetchval("SELECT SUM(amount) FROM transactions WHERE date LIKE $1", f"{today}%")
-        
-        # Jami yaratilgan hujjatlar
-        docs = await conn.fetchval("SELECT COUNT(*) FROM history")
-        
-        if income is None: income = 0
-    return total, blocked, new_users, income, docs
-
-async def get_financial_report():
-    async with pool.acquire() as conn:
-        today = datetime.now().strftime("%Y-%m-%d")
-        month = datetime.now().strftime("%Y-%m")
-        
-        daily = await conn.fetchval("SELECT SUM(amount) FROM transactions WHERE date LIKE $1", f"{today}%")
-        monthly = await conn.fetchval("SELECT SUM(amount) FROM transactions WHERE date LIKE $1", f"{month}%")
-        total = await conn.fetchval("SELECT SUM(amount) FROM transactions")
-        
-        query = """
-            SELECT t.date, u.full_name, t.amount 
-            FROM transactions t 
-            JOIN users u ON t.user_id = u.user_id 
-            ORDER BY t.id DESC LIMIT 20
-        """
-        last_txs = await conn.fetch(query)
-        
-        return (daily or 0), (monthly or 0), (total or 0), last_txs
-
-async def get_usage_history():
-    """Foydalanuvchilar nima yasaganini olish"""
-    async with pool.acquire() as conn:
-        query = """
-            SELECT h.date, u.full_name, h.doc_type, h.topic, h.pages
-            FROM history h
-            JOIN users u ON h.user_id = u.user_id
-            ORDER BY h.id DESC LIMIT 20
-        """
-        return await conn.fetch(query)
+        users = await conn.fetchval("SELECT COUNT(*) FROM users")
+        income = await conn.fetchval("SELECT SUM(amount) FROM transactions")
+        files = await conn.fetchval("SELECT COUNT(*) FROM history")
+        return users, (income or 0), (files or 0)
 
 # ==============================================================================
-# 3. FORMATTING (PPTX & DOCX)
+# PROFESSIONAL FORMATTING ENGINES
 # ==============================================================================
-def set_font_style(run, size=14, bold=False):
-    run.font.name = 'Times New Roman'
-    run.font.size = Pt(size)
-    run.bold = bold
+def clean_text(text):
+    text = text.replace("**", "").replace("##", "").replace("###", "")
+    return re.sub(r'\n+', '\n', text).strip()
 
-def add_markdown_paragraph(paragraph, text):
-    paragraph.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
-    paragraph.paragraph_format.line_spacing = 1.15
-    paragraph.paragraph_format.space_after = Pt(10)
-    parts = re.split(r'(\*\*.*?\*\*)', text)
-    for part in parts:
-        run = paragraph.add_run()
-        if part.startswith('**') and part.endswith('**'):
-            run.text = part[2:-2]
-            set_font_style(run, 14, True)
-        else:
-            run.text = part
-            set_font_style(run, 14, False)
-
-# PPTX HELPER
-def add_pptx_markdown_text(text_frame, text, font_size=14, color=None, font_name="Arial"):
-    p = text_frame.add_paragraph()
-    p.space_after = PptxPt(6)
-    p.line_spacing = 1.0
-    parts = re.split(r'(\*\*.*?\*\*)', text)
-    for part in parts:
-        run = p.add_run()
-        run.font.size = PptxPt(font_size)
-        run.font.name = font_name
-        if color: run.font.color.rgb = color
-        if part.startswith('**') and part.endswith('**'):
-            run.text = part[2:-2]
-            run.font.bold = True
-        else:
-            run.text = part
-            run.font.bold = False
-
-def create_presentation(data_list, title_info, design="blue"):
+# --- PPTX (SLAYD) ---
+def create_presentation(data_list, info, design="blue"):
     prs = Presentation()
+    
+    # Mavzular
     themes = {
-        "blue": {"bg": PptxRGB(255,255,255), "tit": PptxRGB(0,51,153), "txt": PptxRGB(60,60,60), "acc": PptxRGB(0,120,215), "shape": MSO_SHAPE.RECTANGLE},
-        "dark": {"bg": PptxRGB(30,30,40), "tit": PptxRGB(255,215,0), "txt": PptxRGB(240,240,240), "acc": PptxRGB(60,60,80), "shape": MSO_SHAPE.ROUNDED_RECTANGLE},
-        "green": {"bg": PptxRGB(240,255,240), "tit": PptxRGB(0,100,0), "txt": PptxRGB(20,20,20), "acc": PptxRGB(50,205,50), "shape": MSO_SHAPE.OVAL},
-        "orange": {"bg": PptxRGB(255,250,245), "tit": PptxRGB(200,70,0), "txt": PptxRGB(50,20,0), "acc": PptxRGB(255,140,0), "shape": MSO_SHAPE.ISOSCELES_TRIANGLE},
+        "blue": {"bg": PptxRGB(255,255,255), "main": PptxRGB(0,51,102), "acc": PptxRGB(0,120,215), "txt": PptxRGB(60,60,60)},
+        "dark": {"bg": PptxRGB(30,30,35), "main": PptxRGB(255,215,0), "acc": PptxRGB(80,80,80), "txt": PptxRGB(240,240,240)},
+        "green": {"bg": PptxRGB(245,255,245), "main": PptxRGB(0,100,0), "acc": PptxRGB(50,205,50), "txt": PptxRGB(20,20,20)},
+        "orange": {"bg": PptxRGB(255,250,245), "main": PptxRGB(200,70,0), "acc": PptxRGB(255,140,0), "txt": PptxRGB(40,40,40)},
     }
     th = themes.get(design, themes["blue"])
 
-    # Slide 1
-    slide = prs.slides.add_slide(prs.slide_layouts[6]) 
-    slide.background.fill.solid()
-    slide.background.fill.fore_color.rgb = th["bg"]
+    # 1. TITUL SLAYD
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
+    slide.background.fill.solid(); slide.background.fill.fore_color.rgb = th["bg"]
     
-    shape = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, 0, 0, PptxInches(2.5), prs.slide_height)
-    shape.fill.solid(); shape.fill.fore_color.rgb = th["acc"]
+    # Ramka
+    shape = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, PptxInches(0.5), PptxInches(0.5), PptxInches(9), PptxInches(6.5))
+    shape.fill.background(); shape.line.color.rgb = th["main"]; shape.line.width = PptxPt(3)
     
-    dec = slide.shapes.add_shape(th["shape"], PptxInches(8.5), PptxInches(0.5), PptxInches(1), PptxInches(1))
-    dec.fill.solid(); dec.fill.fore_color.rgb = th["tit"]
+    # Sarlavha
+    tb = slide.shapes.add_textbox(PptxInches(1), PptxInches(2), PptxInches(8), PptxInches(2.5))
+    p = tb.text_frame.add_paragraph()
+    p.text = info['topic'].upper()
+    p.font.size = PptxPt(36); p.font.bold = True; p.font.color.rgb = th["main"]; p.alignment = PP_ALIGN.CENTER
+    
+    # Info
+    ib = slide.shapes.add_textbox(PptxInches(4.5), PptxInches(5), PptxInches(5), PptxInches(2))
+    tf = ib.text_frame
+    def al(k, v):
+        if v and v != "-":
+            p = tf.add_paragraph(); p.text = f"{k}: {v}"; p.font.size = PptxPt(16); p.font.color.rgb = th["txt"]; p.alignment = PP_ALIGN.RIGHT
+    al("Bajardi", info['student']); al("Guruh", info['group']); al("Qabul qildi", info['teacher'])
 
-    tb = slide.shapes.add_textbox(PptxInches(3), PptxInches(1), PptxInches(6.5), PptxInches(4))
-    p = tb.text_frame.paragraphs[0]
-    p.text = title_info['topic'].upper()
-    p.font.size = PptxPt(40); p.font.bold = True; p.font.color.rgb = th["tit"]
-    tb.text_frame.word_wrap = True
-    
-    ib = slide.shapes.add_textbox(PptxInches(3), PptxInches(5.5), PptxInches(6.5), PptxInches(2))
-    it = f"Tayyorladi: {title_info['student']}\n"
-    if title_info['group'] != "-": it += f"Guruh: {title_info['group']}\n"
-    if title_info['direction'] != "-": it += f"Yo'nalish: {title_info['direction']}\n"
-    it += f"\nFan: {title_info['subject']}\nQabul qildi: {title_info['teacher']}"
-    ip = ib.text_frame.paragraphs[0]
-    ip.text = it; ip.font.size = PptxPt(18); ip.font.color.rgb = th["txt"]
-
-    for s_data in data_list:
+    # 2. CONTENT SLIDES
+    for item in data_list:
         slide = prs.slides.add_slide(prs.slide_layouts[6])
         slide.background.fill.solid(); slide.background.fill.fore_color.rgb = th["bg"]
         
-        head = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, PptxInches(0.5), PptxInches(0.3), PptxInches(9), PptxInches(1))
-        head.fill.solid(); head.fill.fore_color.rgb = th["acc"]
+        # Header Line
+        head = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, 0, 0, PptxInches(10), PptxInches(1.2))
+        head.fill.solid(); head.fill.fore_color.rgb = th["main"]; head.line.fill.background()
         
-        tbox = slide.shapes.add_textbox(PptxInches(0.6), PptxInches(0.4), PptxInches(8.8), PptxInches(0.8))
-        tp = tbox.text_frame.paragraphs[0]
-        tp.text = s_data.get("title", "Mavzu")
-        tp.font.size = PptxPt(28); tp.font.bold = True; tp.font.color.rgb = PptxRGB(255,255,255)
+        # Sarlavha
+        ht = slide.shapes.add_textbox(PptxInches(0.5), PptxInches(0.2), PptxInches(9), PptxInches(0.8))
+        hp = ht.text_frame.add_paragraph()
+        hp.text = clean_text(item['title'])
+        hp.font.size = PptxPt(28); hp.font.bold = True; hp.font.color.rgb = PptxRGB(255,255,255); hp.alignment = PP_ALIGN.CENTER
         
-        bbox = slide.shapes.add_textbox(PptxInches(0.5), PptxInches(1.5), PptxInches(9), PptxInches(5.5))
-        tf = bbox.text_frame; tf.word_wrap = True
+        # Asosiy Matn
+        bt = slide.shapes.add_textbox(PptxInches(0.5), PptxInches(1.5), PptxInches(9), PptxInches(5.5))
+        tf = bt.text_frame; tf.word_wrap = True
         
-        content = s_data.get("content", "")
-        fs = 14 if len(content) < 600 else 11
-        for para in content.split('\n'):
-            if len(para.strip()) > 3: add_pptx_markdown_text(tf, "• " + para.strip(), fs, th["txt"], "Arial")
+        content = clean_text(item['content'])
+        # AQLLI SHRIFT (AUTO-SCALE)
+        chars = len(content)
+        fs = 20
+        if chars > 600: fs = 14
+        elif chars > 400: fs = 16
+        elif chars > 300: fs = 18
+        
+        for line in content.split('\n'):
+            line = line.strip()
+            if len(line) > 3:
+                p = tf.add_paragraph()
+                p.text = "• " + line
+                p.font.size = PptxPt(fs); p.font.color.rgb = th["txt"]
+                p.space_after = PptxPt(8)
 
     out = BytesIO()
     prs.save(out); out.seek(0)
     return out
 
-def create_document(full_text_data, title_info, doc_type="Referat"):
+# --- DOCX ENGINE ---
+def create_document(data_list, info, doc_type="Referat"):
     doc = Document()
-    for s in doc.sections: s.top_margin = Cm(2.0); s.bottom_margin = Cm(2.0); s.left_margin = Cm(3.0); s.right_margin = Cm(1.5)
+    style = doc.styles['Normal']
+    style.font.name = 'Times New Roman'
+    style.font.size = Pt(14)
+    style.paragraph_format.line_spacing = 1.5
+    
+    # Marginlar
+    for s in doc.sections:
+        s.top_margin = Cm(2); s.bottom_margin = Cm(2); s.left_margin = Cm(3); s.right_margin = Cm(1.5)
+
+    # TITUL VARAQ (Professional Jadval)
     for _ in range(4): doc.add_paragraph()
-    p = doc.add_paragraph("O'ZBEKISTON RESPUBLIKASI OLIY TA'LIM, FAN VA INNOVATSIYALAR VAZIRLIGI")
-    p.alignment = WD_ALIGN_PARAGRAPH.CENTER; set_font_style(p.runs[0], 14, True)
-
-    if title_info['edu_place'] != "-":
-        p = doc.add_paragraph(title_info['edu_place'].upper()); p.alignment = WD_ALIGN_PARAGRAPH.CENTER; set_font_style(p.runs[0], 12, True)
-
-    for _ in range(5): doc.add_paragraph()
-    p = doc.add_paragraph(doc_type.upper()); p.alignment = WD_ALIGN_PARAGRAPH.CENTER; set_font_style(p.runs[0], 24, True)
-    p = doc.add_paragraph(f"Mavzu: {title_info['topic']}"); p.alignment = WD_ALIGN_PARAGRAPH.CENTER; set_font_style(p.runs[0], 16, True)
+    p = doc.add_paragraph("O'ZBEKISTON RESPUBLIKASI\nOLIY TA'LIM, FAN VA INNOVATSIYALAR VAZIRLIGI")
+    p.alignment = WD_ALIGN_PARAGRAPH.CENTER; p.runs[0].bold = True
+    
+    if info['edu_place'] != "-":
+        p = doc.add_paragraph(info['edu_place'].upper())
+        p.alignment = WD_ALIGN_PARAGRAPH.CENTER; p.runs[0].bold = True
 
     for _ in range(6): doc.add_paragraph()
-    ip = doc.add_paragraph(); ip.paragraph_format.left_indent = Cm(9)
-    def al(k, v):
-        if v and v != "-": r = ip.add_run(f"{k}: {v}\n"); set_font_style(r, 14, k in ["Bajardi", "Qabul qildi"])
-    
-    al("Bajardi", title_info['student']); al("Guruh", title_info.get('group')); al("Yo'nalish", title_info.get('direction'))
-    al("Qabul qildi", title_info['teacher']); al("Fan", title_info['subject'])
-    doc.add_page_break()
+    p = doc.add_paragraph(doc_type.upper())
+    p.alignment = WD_ALIGN_PARAGRAPH.CENTER; p.runs[0].font.size = Pt(22); p.runs[0].bold = True
+    p = doc.add_paragraph(f"Mavzu: {info['topic']}")
+    p.alignment = WD_ALIGN_PARAGRAPH.CENTER; p.runs[0].bold = True
 
-    for sec in full_text_data:
-        h = doc.add_paragraph(sec.get("title", "")); h.alignment = WD_ALIGN_PARAGRAPH.CENTER; set_font_style(h.runs[0], 16, True)
+    for _ in range(5): doc.add_paragraph()
+    
+    # Info Table
+    table = doc.add_table(rows=4, cols=2)
+    table.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+    
+    def fill_row(idx, label, val):
+        if val != "-":
+            cell = table.rows[idx].cells[1]
+            p = cell.paragraphs[0]
+            r = p.add_run(f"{label}: {val}")
+            r.bold = label in ["Bajardi", "Qabul qildi"]
+            r.font.size = Pt(14)
+
+    fill_row(0, "Bajardi", info['student'])
+    fill_row(1, "Guruh", info['group'])
+    fill_row(2, "Yo'nalish", info['direction'])
+    fill_row(3, "Qabul qildi", info['teacher'])
+
+    doc.add_page_break()
+    
+    # CONTENT
+    for item in data_list:
+        h = doc.add_paragraph(clean_text(item['title']))
+        h.alignment = WD_ALIGN_PARAGRAPH.CENTER; h.runs[0].bold = True; h.runs[0].font.size = Pt(16)
         h.paragraph_format.space_after = Pt(12)
-        cont = sec.get("content", "")
-        if not cont or len(cont) < 10: cont = "Ma'lumot topilmadi."
-        for para in cont.split('\n'):
-            if len(para.strip()) > 3: p = doc.add_paragraph(); p.paragraph_format.first_line_indent = Cm(1.27); add_markdown_paragraph(p, para.strip())
+        
+        for para in clean_text(item['content']).split('\n'):
+            if len(para) > 5:
+                p = doc.add_paragraph(para)
+                p.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY; p.paragraph_format.first_line_indent = Cm(1.27)
 
     out = BytesIO()
     doc.save(out); out.seek(0)
     return out
 
+# --- PDF ENGINE ---
+class PDF(FPDF):
+    def footer(self):
+        self.set_y(-15)
+        self.set_font("DejaVu", '', 10)
+        self.cell(0, 10, f'Bet {self.page_no()}', align='C')
+
+def create_pdf(data_list, info, doc_type="Referat"):
+    pdf = PDF()
+    try:
+        pdf.add_font("DejaVu", "", FONT_PATH, uni=True)
+        pdf.add_font("DejaVu", "B", FONT_PATH, uni=True)
+    except:
+        return None # Font yo'q bo'lsa xato qaytarmaslik uchun
+
+    pdf.set_font("DejaVu", "", 12)
+    pdf.add_page()
+    
+    # TITUL
+    pdf.set_font("DejaVu", "B", 14)
+    pdf.cell(0, 10, "O'ZBEKISTON RESPUBLIKASI", ln=True, align='C')
+    pdf.cell(0, 10, "OLIY TA'LIM, FAN VA INNOVATSIYALAR VAZIRLIGI", ln=True, align='C')
+    pdf.ln(5)
+    if info['edu_place'] != "-":
+        pdf.multi_cell(0, 10, info['edu_place'].upper(), align='C')
+    
+    pdf.ln(40)
+    pdf.set_font("DejaVu", "B", 24)
+    pdf.cell(0, 10, doc_type.upper(), ln=True, align='C')
+    pdf.ln(10)
+    pdf.set_font("DejaVu", "B", 16)
+    pdf.multi_cell(0, 10, f"Mavzu: {info['topic']}", align='C')
+    
+    pdf.ln(50)
+    pdf.set_font("DejaVu", "", 14)
+    
+    # Info
+    start_x = 100
+    def add_line(label, val):
+        if val != "-":
+            pdf.set_x(start_x)
+            pdf.set_font("DejaVu", "B" if label in ["Bajardi", "Qabul qildi"] else "", 14)
+            pdf.cell(0, 10, f"{label}: {val}", ln=True)
+
+    add_line("Bajardi", info['student'])
+    add_line("Guruh", info['group'])
+    add_line("Yo'nalish", info['direction'])
+    add_line("Qabul qildi", info['teacher'])
+
+    # CONTENT
+    pdf.add_page()
+    for item in data_list:
+        pdf.set_font("DejaVu", "B", 16)
+        pdf.multi_cell(0, 10, clean_text(item['title']), align='C')
+        pdf.ln(5)
+        pdf.set_font("DejaVu", "", 12)
+        pdf.multi_cell(0, 8, clean_text(item['content']))
+        pdf.ln(10)
+
+    out = BytesIO()
+    out.write(pdf.output())
+    out.seek(0)
+    return out
+
 # ==============================================================================
-# 4. AI LOGIKA
+# AI LOGIC
 # ==============================================================================
 async def call_groq(messages):
     for _ in range(len(GROQ_API_KEYS) * 2):
-        api_key = next(api_key_cycle)
+        key = next(api_key_cycle)
         for model in GROQ_MODELS:
             try:
-                cl = AsyncOpenAI(api_key=api_key, base_url="https://api.groq.com/openai/v1")
-                resp = await cl.chat.completions.create(model=model, messages=messages, temperature=0.7, max_tokens=1500)
+                cl = AsyncOpenAI(api_key=key, base_url="https://api.groq.com/openai/v1")
+                resp = await cl.chat.completions.create(model=model, messages=messages, temperature=0.6, max_tokens=2048)
                 await cl.close()
                 return resp.choices[0].message.content
             except: continue
     return None
 
-async def generate_content(topic, pages, doc_type, custom_plan, status_msg):
-    async def upd(pct, txt):
+async def generate_full_content(topic, pages, doc_type, custom_plan, status_msg):
+    async def progress(pct, text):
         if status_msg:
-            try: await status_msg.edit_text(f"⏳ <b>Jarayon: {pct}%</b>\n\n📝 {txt}", parse_mode="HTML")
+            try: await status_msg.edit_text(f"⏳ <b>Jarayon: {pct}%</b>\n\n📝 {text}", parse_mode="HTML")
             except: pass
 
+    await progress(5, "Reja tuzilmoqda...")
+    
     if doc_type == "taqdimot":
-        await upd(10, "Reja tuzilmoqda...")
-        plan = custom_plan if custom_plan != "-" else f"Mavzu: {topic}. {pages} ta slayd uchun sarlavhalar."
-        res = await call_groq([{"role":"user","content":plan}])
-        titles = [x.strip() for x in re.split(r'[,\n]', res) if len(x)>3][:pages] if res else ["Kirish", "Asosiy", "Xulosa"]
-        
-        slides = []
-        for i, t in enumerate(titles):
-            await upd(int((i/len(titles))*90)+10, f"Yozilmoqda: {t}")
-            p = f"Mavzu: {topic}. Slayd: {t}. 200 so'zli aniq punktli matn yoz. Muhim so'zlarni **qalin** qil."
-            c = await call_groq([{"role":"user","content":p}])
-            slides.append({"title": t, "content": c or "..."})
-            await asyncio.sleep(0.3)
-        return slides
-    else:
-        await upd(5, "Reja tuzilmoqda...")
-        n_chaps = max(4, int(pages/2.5))
-        if custom_plan != "-": chaps = [x.strip() for x in re.split(r'[,\n]', custom_plan) if len(x)>3]
-        else:
-            res = await call_groq([{"role":"user","content":f"Mavzu: {topic}. {n_chaps} ta bob nomi."}])
-            chaps = [x.strip() for x in re.split(r'[,\n]', res) if len(x)>5] if res else ["Kirish", "Asosiy", "Xulosa"]
+        prompt = f"Mavzu: {topic}. {pages} ta slayd uchun sarlavhalar ro'yxatini tuz (JSON array)."
+        res = await call_groq([{"role":"system","content":"Return JSON array only."}, {"role":"user","content":prompt}])
+        try: titles = json.loads(res)
+        except: titles = [f"Slayd {i}" for i in range(1, pages+1)]
         
         data = []
-        for i, ch in enumerate(chaps[:n_chaps]):
-            await upd(int((i/len(chaps))*90), f"Yozilmoqda: {ch}")
-            p = f"Mavzu: {topic}. Bob: {ch}. 1000 so'zli ilmiy matn yoz. **Qalin** so'zlar ishlat."
-            c = await call_groq([{"role":"user","content":p}])
-            data.append({"title": ch, "content": c or "..."})
-            await asyncio.sleep(0.5)
+        for i, t in enumerate(titles[:pages]):
+            await progress(10 + int((i/len(titles))*80), f"Yozilmoqda: {t}")
+            # PPTX uchun qisqa va aniq bullet points
+            p_text = f"Mavzu: {topic}. Slayd: {t}. Faqat muhim 4-5 ta punkt yoz. Kirish so'zlarsiz."
+            content = await call_groq([{"role":"user", "content":p_text}])
+            data.append({"title": t, "content": content})
+        return data
+
+    else: # DOCX/PDF
+        num = max(4, int(pages/2))
+        prompt = f"Mavzu: {topic}. {num} ta bobdan iborat reja."
+        if custom_plan != "-": prompt += f" Reja: {custom_plan}"
+        
+        res = await call_groq([{"role":"user", "content":prompt}])
+        chapters = [x for x in res.split('\n') if len(x)>5][:num]
+        if len(chapters)<3: chapters = ["Kirish", "Asosiy qism", "Xulosa"]
+        
+        data = []
+        for i, ch in enumerate(chapters):
+            await progress(10 + int((i/len(chapters))*80), f"Yozilmoqda: {ch}")
+            p_text = f"Mavzu: {topic}. Bob: {ch}. 700 so'zli ilmiy matn."
+            content = await call_groq([{"role":"user", "content":p_text}])
+            data.append({"title": ch, "content": content})
         return data
 
 # ==============================================================================
-# 5. KEYBOARDS & HANDLERS
+# BOT HANDLERS
 # ==============================================================================
 router = Router()
 
-main_menu = ReplyKeyboardMarkup(keyboard=[
-    [KeyboardButton(text="📊 Taqdimot"), KeyboardButton(text="📝 Mustaqil ish")],
-    [KeyboardButton(text="📑 Referat"), KeyboardButton(text="📂 Namunalar")], 
-    [KeyboardButton(text="💰 Mening hisobim"), KeyboardButton(text="💳 To'lov qilish")],
-    [KeyboardButton(text="📞 Yordam")]
-], resize_keyboard=True)
-
+main_kb = ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="📊 Taqdimot"), KeyboardButton(text="📝 Mustaqil ish")], [KeyboardButton(text="📑 Referat"), KeyboardButton(text="📂 Namunalar")], [KeyboardButton(text="💰 Balans"), KeyboardButton(text="💳 To'lov qilish")], [KeyboardButton(text="📞 Yordam")]], resize_keyboard=True)
 cancel_kb = ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="❌ Bekor qilish")]], resize_keyboard=True)
-def get_skip_kb(): return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="➡️ O'tkazib yuborish", callback_data="skip_step")]])
+skip_kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="➡️ O'tkazib yuborish", callback_data="skip")]])
 
-def design_kb():
-    b = InlineKeyboardBuilder()
-    b.button(text="🔵 Biznes", callback_data="design_blue"); b.button(text="🌑 Dark", callback_data="design_dark")
-    b.button(text="🌿 Tabiat", callback_data="design_green"); b.button(text="🍊 Orange", callback_data="design_orange")
-    b.adjust(2); return b.as_markup()
+class Form(StatesGroup):
+    type = State(); topic = State(); plan = State(); student = State(); uni = State(); fac = State(); grp = State(); subj = State(); teach = State(); design = State(); len = State(); format = State()
+class PayState(StatesGroup): screenshot = State(); amount = State()
+class AdminState(StatesGroup): bc_msg=State(); price_val=State(); price_key=State(); add_adm=State()
 
-async def get_length_kb(is_pptx=False):
-    b = InlineKeyboardBuilder()
-    if is_pptx:
-        for n in [10, 15, 20]:
-            p = await get_price(f"pptx_{n}")
-            b.button(text=f"{n} Slayd ({p:,} so'm)", callback_data=f"len_{n}_{p}")
-    else:
-        for n in [15, 20, 25, 30]:
-            p = await get_price(f"docx_{n}")
-            b.button(text=f"{n}-{n+5} Bet ({p:,} so'm)", callback_data=f"len_{n}_{p}")
-    b.adjust(1); return b.as_markup()
-
-def admin_kb():
-    b = InlineKeyboardBuilder()
-    b.button(text="📊 Statistika", callback_data="adm_stats")
-    b.button(text="📝 Foydalanish tarixi", callback_data="adm_usage")
-    b.button(text="📜 To'lovlar", callback_data="adm_history")
-    b.button(text="👤 Adminlar", callback_data="adm_manage")
-    b.button(text="🛠 Narxlar", callback_data="adm_prices")
-    b.button(text="💰 Balans", callback_data="adm_edit_bal")
-    b.button(text="✉️ Xabar", callback_data="adm_broadcast_menu")
-    b.button(text="➕ Namuna", callback_data="adm_add_sample")
-    b.button(text="🗑 Yopish", callback_data="adm_close")
-    b.adjust(2); return b.as_markup()
-
-class GenDoc(StatesGroup): doc_type=State(); topic=State(); custom_plan=State(); student=State(); edu_place=State(); direction=State(); group=State(); subject=State(); teacher=State(); design=State(); length=State()
-class PayState(StatesGroup): screenshot=State(); amount=State()
-class AdminState(StatesGroup): broadcast_type=State(); broadcast_id=State(); broadcast_msg=State(); block_id=State(); unblock_id=State(); sample_file=State(); sample_caption=State(); price_key=State(); price_value=State(); balance_id=State(); balance_amount=State(); add_admin_id=State(); del_admin_id=State()
-class IsAdmin(Filter): 
-    async def __call__(self, m: types.Message): return await is_admin_check(m.from_user.id)
-
-# --- USER HANDLERS ---
 @router.message(CommandStart())
 async def start(m: types.Message):
-    await get_or_create_user(m.from_user.id, m.from_user.username, m.from_user.full_name)
-    await m.answer(f"👋 Salom, <b>{m.from_user.first_name}</b>!\n\nAI yordamida hujjatlar tayyorlovchi botga xush kelibsiz.", parse_mode="HTML", reply_markup=main_menu)
+    await create_user(m.from_user.id, m.from_user.username, m.from_user.full_name)
+    await m.answer("👋 <b>Assalomu alaykum!</b>\nProfessional darajadagi Referat, Slayd va Mustaqil ishlar tayyorlayman.", parse_mode="HTML", reply_markup=main_kb)
 
 @router.message(F.text == "❌ Bekor qilish")
-async def cancel(m: types.Message, state: FSMContext): await state.clear(); await m.answer("Bekor qilindi.", reply_markup=main_menu)
-
+async def cancel(m: types.Message, state: FSMContext): await state.clear(); await m.answer("Bekor qilindi.", reply_markup=main_kb)
 @router.message(F.text == "📞 Yordam")
-async def help_h(m: types.Message):
-    await m.answer(f"👨‍💻 <b>Admin:</b> @{ADMIN_USERNAME}\n\nBot ishlatish bo'yicha savollaringiz bo'lsa adminga yozing.", parse_mode="HTML", reply_markup=main_menu)
+async def help_cmd(m: types.Message): await m.answer(f"👨‍💻 <b>Admin:</b> @{ADMIN_USERNAME}\n\n1. Balansni to'ldiring.\n2. Hujjat turini tanlang.\n3. Ma'lumotlarni kiriting.\n4. Tayyor faylni oling.", parse_mode="HTML", reply_markup=main_kb)
 
-@router.message(F.text == "💰 Mening hisobim")
-async def acc(m: types.Message):
-    u = await get_or_create_user(m.from_user.id, m.from_user.username, m.from_user.full_name)
-    txt = (f"👤 <b>Foydalanuvchi:</b> {u['full_name']}\n🆔 {u['user_id']}\n\n💳 <b>Balans:</b> {u['balance']:,} so'm\n"
-           f"🎁 <b>Bepul PPTX:</b> {u['free_pptx']}\n🎁 <b>Bepul DOCX:</b> {u['free_docx']}")
-    await m.answer(txt, parse_mode="HTML")
+@router.message(F.text == "💰 Balans")
+async def balance(m: types.Message):
+    u = await get_user(m.from_user.id)
+    if u: await m.answer(f"🆔 ID: {u['user_id']}\n💰 Balans: {u['balance']} so'm\n📄 Free DOCX: {u['free_docx']}\n📊 Free PPTX: {u['free_pptx']}")
 
+# PAYMENT
 @router.message(F.text == "💳 To'lov qilish")
 async def pay_menu(m: types.Message):
-    kb = InlineKeyboardBuilder()
-    for a in [5000, 10000, 15000, 20000, 30000, 50000]: kb.button(text=f"💎 {a:,}", callback_data=f"pay_{a}")
-    kb.adjust(2); kb.row(InlineKeyboardButton(text="❌ Yopish", callback_data="cancel_pay"))
-    await m.answer("👇 <b>To'lov summasini tanlang:</b>", parse_mode="HTML", reply_markup=kb.as_markup())
+    kb = InlineKeyboardBuilder(); 
+    [kb.button(text=f"💎 {x:,}", callback_data=f"pay_{x}") for x in [5000, 10000, 15000, 20000, 50000]]; kb.adjust(2)
+    kb.row(InlineKeyboardButton(text="❌ Yopish", callback_data="close"))
+    await m.answer("👇 Summani tanlang:", reply_markup=kb.as_markup())
 
 @router.callback_query(F.data.startswith("pay_"))
-async def pay_step1(c: CallbackQuery, state: FSMContext):
+async def pay_init(c: CallbackQuery, state: FSMContext):
     amt = int(c.data.split("_")[1]); await state.update_data(amount=amt)
-    msg = (f"💳 <b>Karta Raqami:</b>\n<code>{KARTA_RAQAMI}</code>\n\n💰 <b>Summa:</b> {amt:,} so'm\n\n📸 Chekni rasmga olib yuboring.")
-    await c.message.edit_text(msg, parse_mode="HTML"); await state.set_state(PayState.screenshot)
-
-@router.callback_query(F.data == "cancel_pay")
-async def pay_c(c: CallbackQuery, state: FSMContext): await c.message.delete(); await state.clear()
+    await c.message.edit_text(f"💳 <b>Karta:</b> <code>{KARTA_RAQAMI}</code>\n💰 <b>Summa:</b> {amt:,} so'm\n\n📸 Chekni rasmga olib yuboring.", parse_mode="HTML"); await state.set_state(PayState.screenshot)
 
 @router.message(PayState.screenshot, F.photo)
-async def pay_step2(m: types.Message, state: FSMContext):
-    d = await state.get_data(); amt = d.get('amount')
-    kb = InlineKeyboardBuilder(); kb.button(text="✅ Tasdiqlash", callback_data=f"ap_{m.from_user.id}_{amt}"); kb.button(text="❌ Rad etish", callback_data=f"de_{m.from_user.id}")
-    for a in await get_all_admins():
-        try: await m.bot.send_photo(a, m.photo[-1].file_id, caption=f"💸 <b>To'lov!</b>\n👤 {m.from_user.full_name}\nID: {m.from_user.id}\n💰 {amt:,}", parse_mode="HTML", reply_markup=kb.as_markup())
+async def pay_check(m: types.Message, state: FSMContext):
+    d = await state.get_data(); amt = d['amount']
+    kb = InlineKeyboardBuilder()
+    kb.button(text="✅ Tasdiqlash", callback_data=f"ap_{m.from_user.id}_{amt}"); kb.button(text="❌ Rad etish", callback_data=f"de_{m.from_user.id}")
+    for admin in await get_admins():
+        try: await m.bot.send_photo(admin, m.photo[-1].file_id, caption=f"💸 <b>To'lov!</b>\n👤 {m.from_user.full_name}\nID: {m.from_user.id}\n💰 {amt:,}", parse_mode="HTML", reply_markup=kb.as_markup())
         except: pass
-    await m.answer("✅ <b>Chek yuborildi!</b>", parse_mode="HTML", reply_markup=main_menu); await state.clear()
+    await m.answer("✅ Adminga yuborildi.", reply_markup=main_kb); await state.clear()
 
-# --- GEN FLOW ---
+@router.callback_query(F.data.startswith("ap_"))
+async def approve(c: CallbackQuery):
+    _, uid, amt = c.data.split("_"); uid=int(uid); amt=int(amt)
+    await update_balance(uid, amt); await add_tx(uid, amt)
+    await c.message.edit_caption(caption=c.message.caption + "\n✅ QABUL QILINDI")
+    await c.bot.send_message(uid, f"✅ Hisobingizga {amt:,} so'm tushdi.")
+
+@router.callback_query(F.data.startswith("de_"))
+async def deny(c: CallbackQuery):
+    uid = int(c.data.split("_")[1])
+    await c.message.edit_caption(caption=c.message.caption + "\n❌ RAD ETILDI")
+    await c.bot.send_message(uid, "❌ To'lov rad etildi.")
+
+# ORDER
 @router.message(F.text.in_(["📊 Taqdimot", "📝 Mustaqil ish", "📑 Referat"]))
-async def gen_start(m: types.Message, state: FSMContext):
-    u = await get_or_create_user(m.from_user.id, m.from_user.username, m.from_user.full_name)
-    if u['is_blocked']: await m.answer("🚫 Siz bloklangansiz."); return
-    doc = "taqdimot" if "Taqdimot" in m.text else "referat"
-    await state.update_data(doc_type=doc); await m.answer("📝 <b>Mavzuni kiriting:</b>", parse_mode="HTML", reply_markup=cancel_kb); await state.set_state(GenDoc.topic)
+async def start_order(m: types.Message, state: FSMContext):
+    u = await get_user(m.from_user.id)
+    if not u: await create_user(m.from_user.id, m.from_user.username, m.from_user.full_name); u = await get_user(m.from_user.id)
+    if u['is_blocked']: return await m.answer("Bloklangansiz.")
+    
+    dtype = "taqdimot" if "Taqdimot" in m.text else "referat"
+    await state.update_data(dtype=dtype)
+    await m.answer("📝 <b>Mavzuni yozing:</b>", parse_mode="HTML", reply_markup=cancel_kb); await state.set_state(Form.topic)
 
-@router.message(GenDoc.topic)
-async def gen_topic(m: types.Message, state: FSMContext):
-    await state.update_data(topic=m.text); await m.answer("📋 <b>Reja kiritasizmi?</b>", parse_mode="HTML", reply_markup=get_skip_kb()); await state.set_state(GenDoc.custom_plan)
-
-@router.callback_query(GenDoc.custom_plan, F.data=="skip_step")
-async def gen_skip_plan(c: CallbackQuery, state: FSMContext):
-    await state.update_data(custom_plan="-"); await c.message.edit_text("📋 Reja: <i>AI tuzadi</i>", parse_mode="HTML"); await c.message.answer("👤 <b>F.I.O:</b>", parse_mode="HTML"); await state.set_state(GenDoc.student)
-
-@router.message(GenDoc.custom_plan)
-async def gen_plan(m: types.Message, state: FSMContext): await state.update_data(custom_plan=m.text); await m.answer("👤 <b>F.I.O:</b>", parse_mode="HTML"); await state.set_state(GenDoc.student)
-@router.message(GenDoc.student)
-async def gen_student(m: types.Message, state: FSMContext): await state.update_data(student=m.text); await m.answer("🏫 <b>O'qish joyi:</b>", parse_mode="HTML", reply_markup=get_skip_kb()); await state.set_state(GenDoc.edu_place)
-@router.callback_query(GenDoc.edu_place, F.data=="skip_step")
-async def gen_skip_edu(c: CallbackQuery, state: FSMContext): await state.update_data(edu_place="-"); await c.message.edit_text("🏫 O'qish joyi: -", parse_mode="HTML"); await c.message.answer("📚 <b>Yo'nalish:</b>", parse_mode="HTML", reply_markup=get_skip_kb()); await state.set_state(GenDoc.direction)
-@router.message(GenDoc.edu_place)
-async def gen_edu(m: types.Message, state: FSMContext): await state.update_data(edu_place=m.text); await m.answer("📚 <b>Yo'nalish:</b>", parse_mode="HTML", reply_markup=get_skip_kb()); await state.set_state(GenDoc.direction)
-@router.callback_query(GenDoc.direction, F.data=="skip_step")
-async def gen_skip_dir(c: CallbackQuery, state: FSMContext): await state.update_data(direction="-"); await c.message.edit_text("📚 Yo'nalish: -", parse_mode="HTML"); await c.message.answer("🔢 <b>Guruh:</b>", parse_mode="HTML", reply_markup=get_skip_kb()); await state.set_state(GenDoc.group)
-@router.message(GenDoc.direction)
-async def gen_dir(m: types.Message, state: FSMContext): await state.update_data(direction=m.text); await m.answer("🔢 <b>Guruh:</b>", parse_mode="HTML", reply_markup=get_skip_kb()); await state.set_state(GenDoc.group)
-@router.callback_query(GenDoc.group, F.data=="skip_step")
-async def gen_skip_grp(c: CallbackQuery, state: FSMContext): await state.update_data(group="-"); await c.message.edit_text("🔢 Guruh: -", parse_mode="HTML"); await c.message.answer("📘 <b>Fan nomi:</b>", parse_mode="HTML"); await state.set_state(GenDoc.subject)
-@router.message(GenDoc.group)
-async def gen_grp(m: types.Message, state: FSMContext): await state.update_data(group=m.text); await m.answer("📘 <b>Fan nomi:</b>", parse_mode="HTML"); await state.set_state(GenDoc.subject)
-@router.message(GenDoc.subject)
-async def gen_subj(m: types.Message, state: FSMContext): await state.update_data(subject=m.text); await m.answer("👨‍🏫 <b>O'qituvchi:</b>", parse_mode="HTML"); await state.set_state(GenDoc.teacher)
-
-@router.message(GenDoc.teacher)
-async def gen_teach(m: types.Message, state: FSMContext):
-    await state.update_data(teacher=m.text)
+@router.message(Form.topic)
+async def get_topic(m: types.Message, state: FSMContext): await state.update_data(topic=m.text); await m.answer("📋 <b>Reja bormi?</b>", reply_markup=skip_kb); await state.set_state(Form.plan)
+@router.callback_query(F.data == "skip", Form.plan)
+async def skip_plan(c: CallbackQuery, state: FSMContext): await state.update_data(plan="-"); await c.message.answer("👤 <b>Ism-Familiya:</b>"); await state.set_state(Form.student)
+@router.message(Form.plan)
+async def get_plan(m: types.Message, state: FSMContext): await state.update_data(plan=m.text); await m.answer("👤 <b>Ism-Familiya:</b>"); await state.set_state(Form.student)
+@router.message(Form.student)
+async def get_st(m: types.Message, state: FSMContext): await state.update_data(student=m.text); await m.answer("🏫 <b>O'qish joyi:</b>", reply_markup=skip_kb); await state.set_state(Form.uni)
+@router.callback_query(F.data == "skip", Form.uni)
+async def skip_uni(c: CallbackQuery, state: FSMContext): await state.update_data(uni="-"); await c.message.answer("📚 <b>Yo'nalish:</b>", reply_markup=skip_kb); await state.set_state(Form.fac)
+@router.message(Form.uni)
+async def get_uni(m: types.Message, state: FSMContext): await state.update_data(uni=m.text); await m.answer("📚 <b>Yo'nalish:</b>", reply_markup=skip_kb); await state.set_state(Form.fac)
+@router.callback_query(F.data == "skip", Form.fac)
+async def skip_fac(c: CallbackQuery, state: FSMContext): await state.update_data(fac="-"); await c.message.answer("🔢 <b>Guruh:</b>", reply_markup=skip_kb); await state.set_state(Form.grp)
+@router.message(Form.fac)
+async def get_fac(m: types.Message, state: FSMContext): await state.update_data(fac=m.text); await m.answer("🔢 <b>Guruh:</b>", reply_markup=skip_kb); await state.set_state(Form.grp)
+@router.callback_query(F.data == "skip", Form.grp)
+async def skip_grp(c: CallbackQuery, state: FSMContext): await state.update_data(grp="-"); await c.message.answer("📘 <b>Fan nomi:</b>"); await state.set_state(Form.subj)
+@router.message(Form.grp)
+async def get_grp(m: types.Message, state: FSMContext): await state.update_data(grp=m.text); await m.answer("📘 <b>Fan nomi:</b>"); await state.set_state(Form.subj)
+@router.message(Form.subj)
+async def get_subj(m: types.Message, state: FSMContext): await state.update_data(subj=m.text); await m.answer("👨‍🏫 <b>O'qituvchi:</b>"); await state.set_state(Form.teach)
+@router.message(Form.teach)
+async def get_teach(m: types.Message, state: FSMContext):
+    await state.update_data(teach=m.text)
     d = await state.get_data()
-    if d['doc_type'] == "taqdimot": await m.answer("🎨 <b>Dizayn:</b>", parse_mode="HTML", reply_markup=design_kb()); await state.set_state(GenDoc.design)
-    else: await state.update_data(design="simple"); kb = await get_length_kb(False); await m.answer("📄 <b>Hajm:</b>", parse_mode="HTML", reply_markup=kb); await state.set_state(GenDoc.length)
+    if d['dtype'] == "taqdimot":
+        kb = InlineKeyboardBuilder(); [kb.button(text=x, callback_data=f"d_{x.lower()}") for x in ["Blue", "Dark", "Green", "Orange"]]; kb.adjust(2)
+        await m.answer("🎨 <b>Dizayn:</b>", reply_markup=kb.as_markup()); await state.set_state(Form.design)
+    else:
+        await state.update_data(design="simple")
+        kb = InlineKeyboardBuilder(); kb.button(text="📄 DOCX (Word)", callback_data="fmt_docx"); kb.button(text="📑 PDF (Fayl)", callback_data="fmt_pdf"); kb.adjust(2)
+        await m.answer("📂 <b>Format:</b>", reply_markup=kb.as_markup()); await state.set_state(Form.format)
 
-@router.callback_query(GenDoc.design)
-async def gen_design(c: CallbackQuery, state: FSMContext): await state.update_data(design=c.data.split("_")[1]); kb = await get_length_kb(True); await c.message.edit_text("📄 <b>Slaydlar:</b>", parse_mode="HTML", reply_markup=kb); await state.set_state(GenDoc.length)
+@router.callback_query(F.data.startswith("d_"), Form.design)
+async def get_design(c: CallbackQuery, state: FSMContext):
+    await state.update_data(design=c.data.split("_")[1], fmt="pptx")
+    kb = InlineKeyboardBuilder()
+    for i in [10, 15, 20]:
+        p = await get_price(f"pptx_{i}")
+        kb.button(text=f"{i} slayd ({p//1000}k)", callback_data=f"len_{i}_{p}")
+    kb.adjust(2)
+    await c.message.edit_text("📄 <b>Slaydlar:</b>", reply_markup=kb.as_markup()); await state.set_state(Form.len)
 
-@router.callback_query(GenDoc.length)
-async def gen_proc(c: CallbackQuery, state: FSMContext):
+@router.callback_query(F.data.startswith("fmt_"), Form.format)
+async def get_fmt(c: CallbackQuery, state: FSMContext):
+    await state.update_data(fmt=c.data.split("_")[1])
+    kb = InlineKeyboardBuilder()
+    for i in [15, 20, 25]:
+        p = await get_price(f"docx_{i}")
+        kb.button(text=f"{i} bet ({p//1000}k)", callback_data=f"len_{i}_{p}")
+    kb.adjust(2)
+    await c.message.edit_text("📄 <b>Hajm:</b>", reply_markup=kb.as_markup()); await state.set_state(Form.len)
+
+@router.callback_query(F.data.startswith("len_"), Form.len)
+async def generate(c: CallbackQuery, state: FSMContext):
     await c.message.delete()
     try:
-        parts = c.data.split("_"); pages, cost = int(parts[1]), int(parts[2])
-        uid = c.from_user.id; u = await get_or_create_user(uid, c.from_user.username, c.from_user.full_name)
-        data = await state.get_data(); dtype = data['doc_type']
-        limit = u['free_pptx'] if dtype == "taqdimot" else u['free_docx']
+        _, page_str, cost_str = c.data.split("_")
+        pages, cost = int(page_str), int(cost_str)
+        uid = c.from_user.id
+        u = await get_user(uid)
+        data = await state.get_data()
         
-        used_free = False
-        if limit > 0: used_free = True; msg = await c.message.answer(f"⏳ <b>Tayyorlanmoqda...</b>\n🎁 Bepul limit.", parse_mode="HTML")
-        elif u['balance'] >= cost: msg = await c.message.answer(f"⏳ <b>Tayyorlanmoqda...</b>\n💳 Balansdan: {cost:,}", parse_mode="HTML")
-        else: await c.message.answer(f"❌ <b>Mablag' yetarli emas!</b>", parse_mode="HTML", reply_markup=main_menu); await state.clear(); return
-
-        res = await generate_content(data['topic'], pages, dtype, data.get('custom_plan'), msg)
-        if not res: await msg.delete(); await c.message.answer("❌ Xatolik.", reply_markup=main_menu); await state.clear(); return
+        ftype = "free_pptx" if data['dtype'] == "taqdimot" else "free_docx"
+        is_free = u[ftype] > 0
+        if not is_free and u['balance'] < cost: return await c.message.answer(f"❌ Mablag' yetarli emas.\nNarxi: {cost:,} so'm", reply_markup=main_kb)
+        
+        msg = await c.message.answer("⏳ <b>Tayyorlanmoqda...</b>\n<i>AI matn yozmoqda...</i>", parse_mode="HTML")
+        content = await generate_full_content(data['topic'], pages, data['dtype'], data['plan'], msg)
+        if not content: return await msg.edit_text("❌ Xatolik yuz berdi.")
 
         info = {k: data.get(k, "-") for k in ['topic','student','edu_place','direction','group','subject','teacher']}
-        if dtype == "taqdimot": f = create_presentation(res, info, data['design']); ext, cap = "pptx", "✅ Tayyor!"
-        else: f = create_document(res, info, "Referat" if dtype=="referat" else "Mustaqil Ish"); ext, cap = "docx", "✅ Tayyor!"
-
-        if used_free: await update_limit(uid, "free_pptx" if dtype == "taqdimot" else "free_docx", -1)
-        else: await update_balance(uid, -cost)
         
-        # --- TARIXGA YOZISH ---
-        await add_generation_log(uid, dtype, data['topic'], pages)
+        if data['dtype'] == "taqdimot":
+            f = create_presentation(content, info, data['design'])
+            fn, cp = f"{data['topic'][:15]}.pptx", "✅ Slayd tayyor!"
+        else:
+            if data.get('fmt') == 'pdf':
+                f = create_pdf(content, info, "Mustaqil Ish" if "Mustaqil" in data['dtype'] else "Referat")
+                if not f: return await msg.edit_text("❌ PDF Font xatosi.")
+                fn, cp = f"{data['topic'][:15]}.pdf", "✅ PDF tayyor!"
+            else:
+                f = create_document(content, info, "Mustaqil Ish" if "Mustaqil" in data['dtype'] else "Referat")
+                fn, cp = f"{data['topic'][:15]}.docx", "✅ DOCX tayyor!"
 
-        await msg.delete(); await c.message.answer_document(BufferedInputFile(f.read(), filename=f"{data['topic'][:15]}.{ext}"), caption=f"{cap}\n\n🤖 {BOT_USERNAME}", reply_markup=main_menu)
+        await c.message.answer_document(BufferedInputFile(f.read(), filename=fn), caption=cp, reply_markup=main_kb)
+        await msg.delete()
+
+        if is_free: await update_limit(uid, ftype, -1)
+        else: await update_balance(uid, -cost)
+        await add_hist(uid, data['dtype'], data['topic'], pages)
+
     except Exception as e:
-        print(e); await c.message.answer("❌ Xatolik yuz berdi.", reply_markup=main_menu)
+        print(f"Error: {e}")
+        await c.message.answer("Texnik xatolik.", reply_markup=main_kb)
     await state.clear()
 
 # --- ADMIN PANEL ---
-# --- TUZATILDI: Command bu yerda ishlatilgan edi ---
 @router.message(Command("admin"))
-async def adm_cmd(m: types.Message):
-    if await is_admin_check(m.from_user.id): await m.answer("Admin Panel", reply_markup=admin_kb())
+async def admin_panel(m: types.Message):
+    if await is_admin(m.from_user.id):
+        kb = InlineKeyboardBuilder()
+        kb.button(text="📊 Statistika", callback_data="adm_stats")
+        kb.button(text="✉️ Xabar", callback_data="adm_bc")
+        kb.button(text="➕ Admin", callback_data="adm_add")
+        kb.button(text="🛠 Narxlar", callback_data="adm_price")
+        kb.adjust(2)
+        await m.answer("👑 Admin Panel:", reply_markup=kb.as_markup())
 
-@router.callback_query(F.data == "adm_manage", IsAdmin())
-async def adm_mng(c: CallbackQuery):
-    if c.from_user.id != ADMIN_ID: await c.answer("Faqat Super Admin!", show_alert=True); return
-    admins = await get_all_admins()
-    msg = f"👤 **Adminlar:**\n" + "".join([f"👮‍♂️ {a}\n" for a in admins])
-    kb = InlineKeyboardBuilder(); kb.button(text="➕ Qo'shish", callback_data="adm_add_new"); kb.button(text="➖ O'chirish", callback_data="adm_del_old"); kb.button(text="🔙", callback_data="adm_back"); kb.adjust(1)
-    await c.message.edit_text(msg, parse_mode="HTML", reply_markup=kb.as_markup())
-@router.callback_query(F.data == "adm_add_new", IsAdmin())
-async def adm_add(c: CallbackQuery, state: FSMContext): await c.message.answer("Yangi ID:", reply_markup=cancel_kb); await state.set_state(AdminState.add_admin_id)
-@router.message(AdminState.add_admin_id)
-async def adm_add_s(m: types.Message, state: FSMContext):
-    try: await add_admin_db(int(m.text)); await m.answer("✅ Qo'shildi", reply_markup=admin_kb())
-    except: await m.answer("Xato ID")
-    await state.clear()
-@router.callback_query(F.data == "adm_del_old", IsAdmin())
-async def adm_del(c: CallbackQuery, state: FSMContext): await c.message.answer("O'chirish ID:", reply_markup=cancel_kb); await state.set_state(AdminState.del_admin_id)
-@router.message(AdminState.del_admin_id)
-async def adm_del_s(m: types.Message, state: FSMContext):
-    try: await remove_admin_db(int(m.text)); await m.answer("🗑 O'chirildi", reply_markup=admin_kb())
-    except: await m.answer("Xato ID")
-    await state.clear()
-@router.callback_query(F.data == "adm_close", IsAdmin())
-async def ac(c: CallbackQuery): await c.message.delete()
-@router.callback_query(F.data == "adm_stats", IsAdmin())
-async def ast(c: CallbackQuery): 
-    t, b, n, i, docs = await get_stats_data()
-    txt = f"📊 <b>Statistika</b>\n\n👥 Jami user: {t}\n🚫 Bloklangan: {b}\n🆕 Bugun: {n}\n💰 Tushum (Bugun): {i:,}\n📂 Yaratilgan fayllar: {docs}"
-    kb = InlineKeyboardBuilder().button(text="🔙", callback_data="adm_back").as_markup()
-    await c.message.edit_text(txt, parse_mode="HTML", reply_markup=kb)
+@router.callback_query(F.data == "adm_stats")
+async def adm_stats(c: CallbackQuery):
+    t, b, _, i, d = await get_stats()
+    await c.message.edit_text(f"📊 <b>Statistika</b>\n\n👥 Userlar: {t}\n🚫 Blok: {b}\n💰 Tushum: {i:,}\n📂 Fayllar: {d}", parse_mode="HTML")
 
-# --- YANGI: FOYDALANISH TARIXI ---
-@router.callback_query(F.data == "adm_usage", IsAdmin())
-async def adm_usage(c: CallbackQuery):
-    hist = await get_usage_history()
-    msg = "📝 <b>Foydalanish Tarixi (Oxirgi 20):</b>\n\n"
-    for h in hist:
-        emoji = "📊" if h['doc_type'] == "taqdimot" else "📑"
-        msg += f"{emoji} <b>{h['full_name']}</b>\n   mavzu: {h['topic'][:20]}...\n   <i>{h['date']}</i>\n\n"
-    if not hist: msg += "Hozircha ma'lumot yo'q."
-    kb = InlineKeyboardBuilder().button(text="🔙", callback_data="adm_back").as_markup()
-    await c.message.edit_text(msg, parse_mode="HTML", reply_markup=kb)
+@router.callback_query(F.data == "adm_bc")
+async def adm_bc(c: CallbackQuery, state: FSMContext):
+    await c.message.answer("Xabarni yuboring:", reply_markup=cancel_kb); await state.set_state(AdminState.bc_msg)
 
-@router.callback_query(F.data == "adm_history", IsAdmin())
-async def adm_hist(c: CallbackQuery):
-    d, m, t, l50 = await get_financial_report()
-    msg = f"📈 <b>To'lovlar</b>\nBugun: {d:,}\nOy: {m:,}\nJami: {t:,}\n\n📜 <b>Oxirgi to'lovlar:</b>\n"
-    for r in l50: msg += f"🔹 {r['date'][5:16]} | {r['full_name'][:10]} | {r['amount']:,}\n"
-    kb = InlineKeyboardBuilder().button(text="🔙", callback_data="adm_back").as_markup()
-    await c.message.edit_text(msg[:4000], parse_mode="HTML", reply_markup=kb)
+@router.message(AdminState.bc_msg)
+async def send_bc(m: types.Message, state: FSMContext):
+    await m.answer("Yuborilmoqda...")
+    async with pool.acquire() as conn:
+        users = await conn.fetch("SELECT user_id FROM users")
+        c = 0
+        for u in users:
+            try: await m.copy_to(u['user_id']); c+=1; await asyncio.sleep(0.05)
+            except: pass
+    await m.answer(f"✅ {c} ta userga bordi.", reply_markup=main_kb); await state.clear()
 
-@router.callback_query(F.data == "adm_back", IsAdmin())
-async def abk(c: CallbackQuery): await c.message.edit_text("Admin Panel", reply_markup=admin_kb())
-@router.callback_query(F.data == "adm_prices", IsAdmin())
-async def adm_pr(c: CallbackQuery):
+@router.callback_query(F.data == "adm_price")
+async def adm_price(c: CallbackQuery):
     kb = InlineKeyboardBuilder()
     for k in DEFAULT_PRICES.keys():
-        val = await get_price(k); label = k.replace("pptx_", "Taqdimot ").replace("docx_", "Referat ")
-        kb.button(text=f"{label} ({val})", callback_data=f"editpr_{k}")
-    kb.button(text="🔙", callback_data="adm_back"); kb.adjust(2); await c.message.edit_text("Narxni tanlang:", reply_markup=kb.as_markup())
-@router.callback_query(F.data.startswith("editpr_"), IsAdmin())
-async def adm_epr(c: CallbackQuery, state: FSMContext): key = c.data.split("_", 1)[1]; await state.update_data(pk=key); await c.message.answer(f"Yangi narx ({await get_price(key)}):", reply_markup=cancel_kb); await state.set_state(AdminState.price_value)
-@router.message(AdminState.price_value)
-async def adm_spr(m: types.Message, state: FSMContext):
-    try: val=int(m.text); d=await state.get_data(); await set_price(d['pk'], val); await m.answer("✅ OK", reply_markup=admin_kb()); await state.clear()
-    except: await m.answer("Raqam yozing.")
-@router.callback_query(F.data == "adm_edit_bal", IsAdmin())
-async def abal(c: CallbackQuery, state: FSMContext): await c.message.answer("User ID:", reply_markup=cancel_kb); await state.set_state(AdminState.balance_id)
-@router.message(AdminState.balance_id)
-async def abal_id(m: types.Message, state: FSMContext):
-    try: uid=int(m.text); u=await get_user(uid); await state.update_data(t_uid=uid); await m.answer(f"User: {u['full_name']} ({u['balance']})\nSumma (+/-):"); await state.set_state(AdminState.balance_amount)
-    except: await m.answer("ID yozing")
-@router.message(AdminState.balance_amount)
-async def abal_amt(m: types.Message, state: FSMContext):
-    try: amt=int(m.text); d=await state.get_data(); await update_balance(d['t_uid'], amt); await m.answer("✅ OK", reply_markup=admin_kb()); await state.clear()
-    except: await m.answer("Raqam yozing")
-@router.callback_query(F.data == "adm_add_sample", IsAdmin())
-async def asamp(c: CallbackQuery, state: FSMContext): await c.message.answer("Fayl:", reply_markup=cancel_kb); await state.set_state(AdminState.sample_file)
-@router.message(AdminState.sample_file, F.document)
-async def asamp_f(m: types.Message, state: FSMContext):
-    fn = m.document.file_name.lower(); ft = "pptx" if "pptx" in fn else "docx" if "doc" in fn else None
-    if not ft: await m.answer("Faqat pptx/docx!"); return
-    await state.update_data(fid=m.document.file_id, ft=ft); await m.answer("Nom:"); await state.set_state(AdminState.sample_caption)
-@router.message(AdminState.sample_caption)
-async def asamp_c(m: types.Message, state: FSMContext):
-    d = await state.get_data(); await add_sample_db(d['fid'], m.text, d['ft']); await m.answer("✅ Saqlandi.", reply_markup=admin_kb()); await state.clear()
-@router.callback_query(F.data.startswith("ap_"), IsAdmin())
-async def ap(c: CallbackQuery):
-    _, uid, amt = c.data.split("_")
-    await update_balance(int(uid), int(amt)); await add_transaction(int(uid), int(amt))
-    await c.message.edit_caption(caption=c.message.caption+"\n✅ QABUL"); await c.bot.send_message(int(uid), f"✅ +{int(amt):,} so'm")
-@router.callback_query(F.data.startswith("de_"), IsAdmin())
-async def de(c: CallbackQuery):
-    uid = int(c.data.split("_")[1]); await c.message.edit_caption(caption=c.message.caption+"\n❌ RAD"); await c.bot.send_message(uid, "❌ To'lov rad etildi.")
-@router.message(F.text == "📂 Namunalar")
-async def samp(m: types.Message):
-    s = await get_all_samples(); 
-    if not s: await m.answer("Hozircha namunalar yo'q.")
-    for r in s: await m.answer_document(r['file_id'], caption=r['caption'])
+        v = await get_price(k)
+        kb.button(text=f"{k} ({v})", callback_data=f"editp_{k}")
+    kb.adjust(2)
+    await c.message.edit_text("Narxni tanlang:", reply_markup=kb.as_markup())
 
-# Broadcast
-@router.callback_query(F.data == "adm_broadcast_menu", IsAdmin())
-async def abm(c: CallbackQuery):
-    kb = InlineKeyboardBuilder(); kb.button(text="📢 All", callback_data="brd_all"); kb.button(text="👤 One", callback_data="brd_one"); kb.button(text="🔙", callback_data="adm_back"); kb.adjust(2); await c.message.edit_text("Kimga?", reply_markup=kb.as_markup())
-@router.callback_query(F.data == "brd_all", IsAdmin())
-async def ba(c: CallbackQuery, state: FSMContext): await state.update_data(bt="all"); await c.message.answer("Xabar:", reply_markup=cancel_kb); await state.set_state(AdminState.broadcast_msg)
-@router.callback_query(F.data == "brd_one", IsAdmin())
-async def bo(c: CallbackQuery, state: FSMContext): await state.update_data(bt="one"); await c.message.answer("ID:", reply_markup=cancel_kb); await state.set_state(AdminState.broadcast_id)
-@router.message(AdminState.broadcast_id)
-async def bi(m: types.Message, state: FSMContext): await state.update_data(tid=int(m.text)); await m.answer("Xabar:"); await state.set_state(AdminState.broadcast_msg)
-@router.message(AdminState.broadcast_msg)
-async def bs(m: types.Message, state: FSMContext):
-    d = await state.get_data()
-    if d['bt']=="all":
-        ids=await get_all_users_ids(); c=0
-        await m.answer(f"⏳ {len(ids)}...")
-        for i in ids:
-            try: await m.copy_to(i); c+=1; await asyncio.sleep(0.05)
-            except: pass
-        await m.answer(f"✅ {c} bordi.", reply_markup=admin_kb())
-    else:
-        try: await m.copy_to(d['tid']); await m.answer("✅ Bordi.", reply_markup=admin_kb())
-        except: await m.answer("❌ Xato")
+@router.callback_query(F.data.startswith("editp_"))
+async def edit_p(c: CallbackQuery, state: FSMContext):
+    key = c.data.split("_", 1)[1]
+    await state.update_data(pk=key); await c.message.answer(f"Yangi narx ({key}):"); await state.set_state(AdminState.price_val)
+
+@router.message(AdminState.price_val)
+async def set_p(m: types.Message, state: FSMContext):
+    try:
+        val = int(m.text); d = await state.get_data()
+        await set_price(d['pk'], val); await m.answer("✅ O'zgardi.")
+    except: await m.answer("Raqam yozing.")
     await state.clear()
+@router.callback_query(F.data == "adm_add")
+async def add_adm(c: CallbackQuery, state: FSMContext):
+    await c.message.answer("Yangi Admin ID:"); await state.set_state(AdminState.add_adm)
+@router.message(AdminState.add_adm)
+async def save_adm(m: types.Message, state: FSMContext):
+    try: await add_admin_db(int(m.text)); await m.answer("Qo'shildi.")
+    except: pass
+    await state.clear()
+
+@router.callback_query(F.data == "close")
+async def close(c: CallbackQuery): await c.message.delete()
 
 async def main():
     await init_db()
@@ -791,7 +669,6 @@ async def main():
     bot = Bot(token=BOT_TOKEN)
     dp = Dispatcher(storage=MemoryStorage())
     dp.include_router(router)
-    print("Bot ishga tushdi (Ultimate Fix)...")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
