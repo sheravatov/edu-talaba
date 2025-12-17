@@ -7,3 +7,5 @@ uvicorn
 requests
 python-dotenv
 asyncpg
+fpdf2
+requests
