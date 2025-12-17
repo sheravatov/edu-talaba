@@ -1,11 +1,10 @@
-aiogram==3.10.0
-openai>=1.0.0
-python-docx
-python-pptx
+aiogram
 fastapi
 uvicorn
-requests
-python-dotenv
 asyncpg
+openai
+python-docx
+python-pptx
+python-dotenv
 fpdf2
 requests
