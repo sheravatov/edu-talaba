@@ -94,13 +94,12 @@ check_font()
 # ==============================================================================
 # DATABASE (Full Log System)
 # ==============================================================================
-pool = None
 async def init_db():
     global pool
     try:
         pool = await asyncpg.create_pool(dsn=DATABASE_URL)
         async with pool.acquire() as conn:
-            # Users table: Added referral info
+            # 1. USERS jadvali
             await conn.execute("""
                 CREATE TABLE IF NOT EXISTS users (
                     user_id BIGINT PRIMARY KEY, username TEXT, full_name TEXT, 
@@ -111,7 +110,14 @@ async def init_db():
                 )
             """)
             
-            # History table: Full details for accountability
+            # MIGRATION: Users jadvalini yangilash (eski userlar uchun)
+            try:
+                await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS referral_id BIGINT DEFAULT 0")
+                await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS invited_count INTEGER DEFAULT 0")
+                await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS free_pdf INTEGER DEFAULT 2")
+            except Exception as e: print(f"Users Migration Info: {e}")
+
+            # 2. HISTORY jadvali (Muammo shu yerda edi)
             await conn.execute("""
                 CREATE TABLE IF NOT EXISTS history (
                     id SERIAL PRIMARY KEY, user_id BIGINT, 
@@ -120,8 +126,24 @@ async def init_db():
                     date TEXT
                 )
             """)
+
+            # MIGRATION: History jadvaliga yetishmayotgan ustunlarni qo'shish
+            try:
+                await conn.execute("ALTER TABLE history ADD COLUMN IF NOT EXISTS student TEXT DEFAULT '-'")
+                await conn.execute("ALTER TABLE history ADD COLUMN IF NOT EXISTS uni TEXT DEFAULT '-'")
+                await conn.execute("ALTER TABLE history ADD COLUMN IF NOT EXISTS faculty TEXT DEFAULT '-'")
+                await conn.execute("ALTER TABLE history ADD COLUMN IF NOT EXISTS grp TEXT DEFAULT '-'")
+                await conn.execute("ALTER TABLE history ADD COLUMN IF NOT EXISTS subject TEXT DEFAULT '-'")
+                await conn.execute("ALTER TABLE history ADD COLUMN IF NOT EXISTS teacher TEXT DEFAULT '-'")
+            except Exception as e: print(f"History Migration Info: {e}")
             
+            # 3. TRANSACTIONS jadvali
             await conn.execute("CREATE TABLE IF NOT EXISTS transactions (id SERIAL PRIMARY KEY, user_id BIGINT, amount INTEGER, date TEXT, type TEXT)")
+            try: 
+                await conn.execute("ALTER TABLE transactions ADD COLUMN IF NOT EXISTS type TEXT DEFAULT 'payment'")
+            except: pass
+
+            # 4. PRICES va ADMINS
             await conn.execute("CREATE TABLE IF NOT EXISTS prices (key TEXT PRIMARY KEY, value INTEGER)")
             await conn.execute("CREATE TABLE IF NOT EXISTS admins (user_id BIGINT PRIMARY KEY, added_date TEXT)")
             
@@ -130,62 +152,9 @@ async def init_db():
             
             if ADMIN_ID:
                 await conn.execute("INSERT INTO admins (user_id, added_date) VALUES ($1, $2) ON CONFLICT (user_id) DO NOTHING", ADMIN_ID, datetime.now().isoformat())
-            print("✅ Baza (Full Log) OK.")
-    except Exception as e: print(f"DB Error: {e}")
-
-async def get_user(uid):
-    async with pool.acquire() as conn: return await conn.fetchrow("SELECT * FROM users WHERE user_id=$1", uid)
-
-async def create_user(uid, uname, fname, referrer_id=0):
-    async with pool.acquire() as conn:
-        exists = await conn.fetchval("SELECT user_id FROM users WHERE user_id=$1", uid)
-        if not exists:
-            await conn.execute("""
-                INSERT INTO users (user_id, username, full_name, referral_id, joined_date) 
-                VALUES ($1, $2, $3, $4, $5)
-            """, uid, uname, fname, referrer_id, datetime.now().strftime("%Y-%m-%d"))
             
-            # Referral Bonus Logic
-            if referrer_id != 0 and referrer_id != uid:
-                await conn.execute("UPDATE users SET balance = balance + $1, invited_count = invited_count + 1 WHERE user_id = $2", REFERRAL_BONUS, referrer_id)
-                await conn.execute("INSERT INTO transactions (user_id, amount, date, type) VALUES ($1, $2, $3, 'referral_bonus')", referrer_id, REFERRAL_BONUS, datetime.now().strftime("%Y-%m-%d %H:%M"))
-                return True # Bonus berildi
-        else:
-            await conn.execute("UPDATE users SET full_name=$1, username=$2 WHERE user_id=$3", fname, uname, uid)
-        return False
-
-async def update_balance(uid, amount, type="payment"):
-    async with pool.acquire() as conn: 
-        await conn.execute("UPDATE users SET balance = balance + $1 WHERE user_id = $2", amount, uid)
-        await conn.execute("INSERT INTO transactions (user_id, amount, date, type) VALUES ($1, $2, $3, $4)", uid, amount, datetime.now().strftime("%Y-%m-%d %H:%M"), type)
-
-async def update_limit(uid, col, val):
-    async with pool.acquire() as conn: await conn.execute(f"UPDATE users SET {col} = {col} + $1 WHERE user_id = $2", val, uid)
-
-# SAVING FULL HISTORY
-async def add_full_hist(uid, dtype, topic, pages, info):
-    async with pool.acquire() as conn:
-        await conn.execute("""
-            INSERT INTO history (user_id, doc_type, topic, pages, student, uni, faculty, grp, subject, teacher, date) 
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-        """, uid, dtype, topic, pages, 
-           info.get('student'), info.get('edu_place'), info.get('direction'), info.get('group'), info.get('subject'), info.get('teacher'),
-           datetime.now().strftime("%Y-%m-%d %H:%M"))
-
-async def get_price(key):
-    async with pool.acquire() as conn: 
-        val = await conn.fetchval("SELECT value FROM prices WHERE key=$1", key)
-        return val if val else DEFAULT_PRICES.get(key, 5000)
-
-async def set_price(key, val):
-    async with pool.acquire() as conn: await conn.execute("INSERT INTO prices (key, value) VALUES ($1, $2) ON CONFLICT (key) DO UPDATE SET value=$2", key, val)
-
-async def is_admin(uid):
-    if uid == ADMIN_ID: return True
-    async with pool.acquire() as conn:
-        res = await conn.fetchval("SELECT user_id FROM admins WHERE user_id=$1", uid)
-        return res is not None
-
+            print("✅ Baza ulandi va jadvallar yangilandi (Migration Done).")
+    except Exception as e: print(f"DB Error: {e}")
 # ==============================================================================
 # ENGINES & DESIGNS
 # ==============================================================================
