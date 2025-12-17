@@ -8,3 +8,4 @@ python-pptx
 python-dotenv
 fpdf2
 requests
+jinja2
