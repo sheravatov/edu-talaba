@@ -32,7 +32,7 @@ import uvicorn
 app = FastAPI()
 
 @app.get("/")
-async def health_check(): return {"status": "Alive", "mode": "GitHub-Safe"}
+async def health_check(): return {"status": "Alive", "mode": "Fixed-Layout"}
 
 async def run_web_server():
     port = int(os.environ.get("PORT", 8000))
@@ -43,28 +43,31 @@ async def run_web_server():
 # --- OPENAI (GROQ) ---
 from openai import AsyncOpenAI
 
-# 1. KONFIGURATSIYA (FAQAT OS.ENVIRON DAN OLADI)
-BOT_TOKEN = os.environ.get("BOT_TOKEN") # Renderdan oladi
-ADMIN_ID = int(os.environ.get("ADMIN_ID", 0)) # Renderdan oladi
+# 1. KONFIGURATSIYA
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
+ADMIN_ID = int(os.environ.get("ADMIN_ID", 0))
 ADMIN_USERNAME = os.environ.get("ADMIN_USERNAME", "admin")
 BOT_USERNAME = os.environ.get("BOT_USERNAME", "bot")
 KARTA_RAQAMI = os.environ.get("KARTA_RAQAMI", "Karta kiritilmagan")
 
-# GROQ KEYS NI RENDERDAN OLIB PARSE QILAMIZ
 groq_keys_str = os.environ.get("GROQ_KEYS", "")
 if "," in groq_keys_str:
     GROQ_API_KEYS = groq_keys_str.split(",")
 else:
     GROQ_API_KEYS = [groq_keys_str] if groq_keys_str else []
 
-if not GROQ_API_KEYS:
-    # Xatolik bermasligi uchun dummy
-    GROQ_API_KEYS = ["gsk_placeholder"]
-
+if not GROQ_API_KEYS: GROQ_API_KEYS = ["dummy_key"]
 api_key_cycle = cycle(GROQ_API_KEYS)
 GROQ_MODELS = ["llama-3.3-70b-versatile", "llama-3.1-8b-instant"]
 
-DB_NAME = "bot_database.db"
+# --- DATABASE PATH (RENDER UCHUN MUHIM) ---
+# Agar Renderda Disk ulangan bo'lsa, /var/data yoki /data papkasida saqlaymiz
+# Aks holda shu yerni o'zida saqlaymiz
+DATA_DIR = "/var/data" if os.path.exists("/var/data") else "."
+DB_NAME = os.path.join(DATA_DIR, "bot_database.db")
+
+print(f"DATABASE PATH: {DB_NAME}")
+
 DEFAULT_PRICES = {
     "pptx_10": 5000, "pptx_15": 7000, "pptx_20": 10000,
     "docx_15": 5000, "docx_20": 7000, "docx_25": 10000, "docx_30": 12000
@@ -77,7 +80,7 @@ from docx.enum.text import WD_ALIGN_PARAGRAPH
 from pptx import Presentation
 from pptx.util import Pt as PptxPt, Inches as PptxInches, Cm as PptxCm
 from pptx.dml.color import RGBColor as PptxRGB
-from pptx.enum.text import PP_ALIGN
+from pptx.enum.text import PP_ALIGN, MSO_ANCHOR
 
 # ==============================================================================
 # 2. DATABASE & HELPERS
@@ -95,12 +98,24 @@ async def init_db():
 
 async def add_user(user_id, username, full_name):
     async with aiosqlite.connect(DB_NAME) as db:
-        try: await db.execute("INSERT INTO users (user_id, username, full_name, free_pptx, free_docx, is_blocked, joined_date) VALUES (?, ?, ?, 5, 5, 0, ?)", (user_id, username, full_name, datetime.now().strftime("%Y-%m-%d %H:%M:%S"))); await db.commit()
-        except: pass
+        try:
+            async with db.execute("SELECT user_id FROM users WHERE user_id = ?", (user_id,)) as cursor:
+                if await cursor.fetchone(): return False
+            await db.execute("INSERT INTO users (user_id, username, full_name, free_pptx, free_docx, is_blocked, joined_date) VALUES (?, ?, ?, 5, 5, 0, ?)", 
+                             (user_id, username, full_name, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+            await db.commit()
+            return True
+        except: return False
 
 async def get_user(user_id):
     async with aiosqlite.connect(DB_NAME) as db:
         async with db.execute("SELECT * FROM users WHERE user_id = ?", (user_id,)) as c: return await c.fetchone()
+
+async def get_or_create_user(user_id, username, full_name):
+    u = await get_user(user_id)
+    if u: return u
+    await add_user(user_id, username, full_name)
+    return await get_user(user_id)
 
 async def update_balance(user_id, amount):
     async with aiosqlite.connect(DB_NAME) as db:
@@ -179,7 +194,7 @@ async def get_financial_report():
     return daily, monthly, total, last_txs
 
 # ==============================================================================
-# 3. FORMATTING (PPTX FIXED ALIGNMENT)
+# 3. FORMATTING (PPTX PERFECT DESIGN)
 # ==============================================================================
 def set_font_style(run, size=14, bold=False):
     run.font.name = 'Times New Roman'
@@ -198,18 +213,19 @@ def add_markdown_paragraph(paragraph, text):
         else:
             run.text = part; set_font_style(run, 14, False)
 
-# --- PPTX MATN FUNKSIYASI (FIXED SIZE) ---
+# --- PPTX: MATN JOYLASHTIRISH ---
 def add_pptx_markdown_text(text_frame, text, font_size=14, color=None, font_name="Arial"):
     p = text_frame.add_paragraph()
-    p.space_after = PptxPt(6) 
-    p.line_spacing = 1.0 # Zich
+    p.space_after = PptxPt(6) # Orasi zich
+    p.line_spacing = 1.1
+    p.alignment = PP_ALIGN.LEFT # Chapga tekislash
+    
     parts = re.split(r'(\*\*.*?\*\*)', text)
     for part in parts:
         run = p.add_run()
-        run.font.size = PptxPt(font_size) # 14pt (250 so'z uchun mos)
+        run.font.size = PptxPt(font_size)
         run.font.name = font_name
         if color: run.font.color.rgb = color
-        
         if part.startswith('**') and part.endswith('**'):
             run.text = part[2:-2]; run.font.bold = True
         else:
@@ -225,52 +241,81 @@ def create_presentation(data_list, title_info, design="blue"):
     }
     th = themes.get(design, themes["blue"])
 
-    # Slide 1 (Titul)
-    slide = prs.slides.add_slide(prs.slide_layouts[6])
+    # --- SLIDE 1: TITUL VAROG'I ---
+    slide = prs.slides.add_slide(prs.slide_layouts[6]) # 6 = Blank
     slide.background.fill.solid(); slide.background.fill.fore_color.rgb = th["bg"]
-    shape = slide.shapes.add_shape(1, 0, 0, PptxInches(4), prs.slide_height)
+    
+    # Chap tomonlama bezak
+    shape = slide.shapes.add_shape(1, 0, 0, PptxInches(3), prs.slide_height)
     shape.fill.solid(); shape.fill.fore_color.rgb = th["acc"]; shape.line.fill.background()
     
-    tb = slide.shapes.add_textbox(PptxInches(1), PptxInches(2), PptxInches(8), PptxInches(3))
-    p = tb.text_frame.paragraphs[0]
-    p.text = title_info['topic'].upper(); p.font.size = PptxPt(40); p.font.bold = True; p.font.name = "Arial"; p.font.color.rgb = th["tit"]; p.alignment = PP_ALIGN.CENTER
-    tb.text_frame.word_wrap = True
+    # 1. Vazirlik (Eng tepada)
+    top_box = slide.shapes.add_textbox(PptxInches(3.5), PptxInches(0.5), PptxInches(6.0), PptxInches(1.0))
+    tp = top_box.text_frame.paragraphs[0]
+    tp.text = "O'ZBEKISTON RESPUBLIKASI\nOLIY TA'LIM, FAN VA INNOVATSIYALAR VAZIRLIGI"
+    tp.font.size = PptxPt(14); tp.font.bold = True; tp.font.color.rgb = th["tit"]; tp.alignment = PP_ALIGN.CENTER
     
-    ib = slide.shapes.add_textbox(PptxInches(1), PptxInches(5), PptxInches(8), PptxInches(2))
-    ip = ib.text_frame.paragraphs[0]
-    ip.text = f"Tayyorladi: {title_info['student']}\nFan: {title_info['subject']}\nQabul qildi: {title_info['teacher']}"
-    ip.font.size = PptxPt(18); ip.font.color.rgb = th["txt"]; ip.font.name = "Arial"; ip.alignment = PP_ALIGN.CENTER
+    # 2. Universitet (Vazirlik tagida)
+    if title_info['edu_place'] != "-":
+        uni_box = slide.shapes.add_textbox(PptxInches(3.5), PptxInches(1.5), PptxInches(6.0), PptxInches(0.8))
+        up = uni_box.text_frame.paragraphs[0]
+        up.text = title_info['edu_place'].upper()
+        up.font.size = PptxPt(16); up.font.bold = True; up.font.color.rgb = th["tit"]; up.alignment = PP_ALIGN.CENTER
 
-    # Slides (Content)
+    # 3. Mavzu (O'rtada, katta)
+    topic_box = slide.shapes.add_textbox(PptxInches(3.5), PptxInches(3.0), PptxInches(6.0), PptxInches(2.5))
+    top_p = topic_box.text_frame.paragraphs[0]
+    top_p.text = title_info['topic'].upper()
+    top_p.font.size = PptxPt(36); top_p.font.bold = True; top_p.font.name = "Arial Black"; top_p.font.color.rgb = th["tit"]
+    top_p.alignment = PP_ALIGN.CENTER
+    topic_box.text_frame.word_wrap = True
+
+    # 4. Talaba ma'lumotlari (Pastda o'ngda)
+    info_text = f"Tayyorladi: {title_info['student']}\n"
+    if title_info['group'] != "-": info_text += f"Guruh: {title_info['group']}\n"
+    if title_info['direction'] != "-": info_text += f"Yo'nalish: {title_info['direction']}\n"
+    info_text += f"\nFan: {title_info['subject']}\nQabul qildi: {title_info['teacher']}"
+
+    info_box = slide.shapes.add_textbox(PptxInches(4.5), PptxInches(5.5), PptxInches(5.0), PptxInches(2.0))
+    ip = info_box.text_frame.paragraphs[0]
+    ip.text = info_text
+    ip.font.size = PptxPt(16); ip.font.color.rgb = th["txt"]; ip.font.name = "Arial"; ip.alignment = PP_ALIGN.LEFT
+
+    # --- SLIDES (CONTENT) ---
     for s_data in data_list:
         slide = prs.slides.add_slide(prs.slide_layouts[6])
         slide.background.fill.solid(); slide.background.fill.fore_color.rgb = th["bg"]
         
-        # Header Line
+        # Sarlavha Qismi (Tepada, ajratilgan)
+        # Chiziq
         line = slide.shapes.add_shape(1, PptxInches(0.5), PptxInches(1.2), PptxInches(9), PptxInches(0.05))
         line.fill.solid(); line.fill.fore_color.rgb = th["acc"]
         
-        # Sarlavha (Tepada, aniq joylashgan)
-        tbox = slide.shapes.add_textbox(PptxInches(0.5), PptxInches(0.2), PptxInches(9), PptxInches(1))
+        # Sarlavha Matni
+        tbox = slide.shapes.add_textbox(PptxInches(0.5), PptxInches(0.3), PptxInches(9), PptxInches(0.8))
         tp = tbox.text_frame.paragraphs[0]
-        tp.text = s_data.get("title", "Mavzu"); tp.font.size = PptxPt(28); tp.font.bold = True; tp.font.color.rgb = th["tit"]; tp.font.name = "Arial"
+        tp.text = s_data.get("title", "Mavzu"); tp.font.size = PptxPt(32); tp.font.bold = True; tp.font.color.rgb = th["tit"]; tp.font.name = "Arial"
         
-        # MATN QUTISI (ANIQ O'LCHAMLAR)
-        bbox = slide.shapes.add_textbox(PptxInches(0.5), PptxInches(1.4), PptxInches(9.0), PptxInches(5.5))
+        # ASOSIY MATN QUTISI (ANIQ CHEGARALAR BILAN)
+        # Left: 0.5, Top: 1.4, Width: 9.0, Height: 5.5
+        # Bu koordinatalar matnni slayd ichida ushlab turadi
+        bbox = slide.shapes.add_textbox(PptxInches(0.5), PptxInches(1.4), PptxInches(9.0), PptxInches(5.6))
         tf = bbox.text_frame
         tf.word_wrap = True
         
         content = s_data.get("content", "")
-        # Matn uzunligiga qarab shriftni avtomatik tanlash
+        # Avto-shrift (Sig'dirish uchun)
         char_count = len(content)
         if char_count > 1200: font_size = 10
-        elif char_count > 800: font_size = 11
-        elif char_count > 600: font_size = 12
-        else: font_size = 14 # Standart
+        elif char_count > 900: font_size = 11
+        elif char_count > 700: font_size = 12
+        elif char_count > 500: font_size = 14
+        else: font_size = 16
         
         paragraphs = content.split('\n')
         for para in paragraphs:
-            if len(para.strip()) > 3:
+            if len(para.strip()) > 2:
+                # Bullet point belgisi (•) bilan
                 add_pptx_markdown_text(tf, "• " + para.strip(), font_size, th["txt"], "Arial")
 
     out = BytesIO(); prs.save(out); out.seek(0)
@@ -295,6 +340,7 @@ def create_document(full_text_data, title_info, doc_type="Referat"):
     ip = doc.add_paragraph(); ip.paragraph_format.left_indent = Cm(9)
     def al(k, v):
         if v and v != "-": r = ip.add_run(f"{k}: {v}\n"); set_font_style(r, 14, k in ["Bajardi", "Qabul qildi"])
+    
     al("Bajardi", title_info['student'])
     al("Guruh", title_info.get('group'))
     al("Yo'nalish", title_info.get('direction'))
@@ -307,7 +353,7 @@ def create_document(full_text_data, title_info, doc_type="Referat"):
         h = doc.add_paragraph(sec.get("title", "")); h.alignment = WD_ALIGN_PARAGRAPH.CENTER
         set_font_style(h.runs[0], 16, True); h.paragraph_format.space_after = Pt(12)
         cont = sec.get("content", "")
-        if not cont or len(cont) < 50: cont = "Ma'lumot topilmadi."
+        if not cont or len(cont) < 10: cont = "Ma'lumot topilmadi."
         for para in cont.split('\n'):
             if len(para.strip()) > 3:
                 p = doc.add_paragraph(); p.paragraph_format.first_line_indent = Cm(1.27)
@@ -369,7 +415,6 @@ async def generate_groq_content(topic, pages, doc_type, custom_plan, status_msg=
             pct = int((i/len(slides_titles))*90) + 10
             await progress(pct, f"Slayd yozilmoqda: {title}")
             
-            # 250 SO'Z (OPTIMAL)
             prompt = (f"Mavzu: {topic}. Slayd: {title}. "
                       f"Shu slayd uchun 200-250 so'zli, punktlarga (bullet points) bo'lingan matn yoz. "
                       f"Juda uzun yozma, slaydga sig'sin. Muhim so'zlarni **qalin** qil.")
@@ -469,7 +514,7 @@ async def adm_m(m: types.Message): await m.answer("Admin Panel", reply_markup=ad
 
 @router.message(CommandStart())
 async def start(m: types.Message):
-    await add_user(m.from_user.id, m.from_user.username, m.from_user.full_name)
+    await get_or_create_user(m.from_user.id, m.from_user.username, m.from_user.full_name)
     await m.answer(f"👋 Salom, {m.from_user.first_name}!", reply_markup=main_menu)
 
 @router.message(F.text == "❌ Bekor qilish")
@@ -477,7 +522,7 @@ async def cancel(m: types.Message, state: FSMContext): await state.clear(); awai
 
 @router.message(F.text.in_(["📊 Taqdimot", "📝 Mustaqil ish", "📑 Referat"]))
 async def st_gen(m: types.Message, state: FSMContext):
-    u = await get_user(m.from_user.id)
+    u = await get_or_create_user(m.from_user.id, m.from_user.username, m.from_user.full_name)
     if u and u[6] == 1: await m.answer("🚫 Bloklangansiz."); return
     doc = "taqdimot" if "Taqdimot" in m.text else "referat"
     await state.update_data(doc_type=doc)
@@ -533,7 +578,10 @@ async def proc(c: CallbackQuery, state: FSMContext):
     await c.message.delete()
     try:
         parts = c.data.split("_"); pages, cost = int(parts[1]), int(parts[2])
-        uid = c.from_user.id; data = await state.get_data(); user = await get_user(uid)
+        uid = c.from_user.id; 
+        user = await get_or_create_user(uid, c.from_user.username, c.from_user.full_name)
+        data = await state.get_data()
+        
         doc_type = data['doc_type']
         free_col = "free_pptx" if doc_type == "taqdimot" else "free_docx"
         limit = user[4] if doc_type == "taqdimot" else user[5]
@@ -627,7 +675,7 @@ async def abal_amt(m: types.Message, state: FSMContext):
 
 @router.message(F.text == "💰 Mening hisobim")
 async def acc(m: types.Message):
-    u = await get_user(m.from_user.id)
+    u = await get_or_create_user(m.from_user.id, m.from_user.username, m.from_user.full_name)
     await m.answer(f"👤 {u[2]}\n🆔 <code>{u[0]}</code>\n💰 {u[3]:,} so'm\n🎁 PPTX: {u[4]} | DOCX: {u[5]}", parse_mode="HTML")
 
 @router.message(F.text == "💳 To'lov qilish")
@@ -733,7 +781,7 @@ async def main():
     bot = Bot(token=BOT_TOKEN)
     dp = Dispatcher(storage=MemoryStorage())
     dp.include_router(router)
-    print("Bot ishladi (GitHub-Safe Version)...")
+    print("Bot ishladi (Fixed Render Data Path)...")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
