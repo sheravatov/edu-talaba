@@ -41,7 +41,7 @@ app = FastAPI()
 @app.head("/")
 @app.get("/", response_class=HTMLResponse)
 async def home():
-    return "<h1>EduBot Pro is Running...</h1>"
+    return "<h1>EduBot Pro Running...</h1>"
 
 async def run_web_server():
     port = int(os.environ.get("PORT", 8000))
@@ -135,7 +135,7 @@ async def init_db():
                 await conn.execute("ALTER TABLE history ADD COLUMN IF NOT EXISTS teacher TEXT DEFAULT '-'")
             except: pass
             
-            # Other tables
+            # Other
             await conn.execute("CREATE TABLE IF NOT EXISTS transactions (id SERIAL PRIMARY KEY, user_id BIGINT, amount INTEGER, date TEXT, type TEXT)")
             await conn.execute("CREATE TABLE IF NOT EXISTS prices (key TEXT PRIMARY KEY, value INTEGER)")
             await conn.execute("CREATE TABLE IF NOT EXISTS admins (user_id BIGINT PRIMARY KEY, added_date TEXT)")
@@ -147,7 +147,7 @@ async def init_db():
             print("✅ Baza yuklandi.")
     except Exception as e: print(f"DB Error: {e}")
 
-# DB Helper Functions
+# DB Functions
 async def get_user(uid):
     if not pool: return None
     async with pool.acquire() as conn: return await conn.fetchrow("SELECT * FROM users WHERE user_id=$1", uid)
@@ -161,7 +161,6 @@ async def create_user(uid, uname, fname, referrer_id=0):
                 INSERT INTO users (user_id, username, full_name, referral_id, joined_date) 
                 VALUES ($1, $2, $3, $4, $5)
             """, uid, uname, fname, referrer_id, datetime.now().strftime("%Y-%m-%d"))
-            
             if referrer_id != 0 and referrer_id != uid:
                 try:
                     await conn.execute("UPDATE users SET balance = balance + $1, invited_count = invited_count + 1 WHERE user_id = $2", REFERRAL_BONUS, referrer_id)
@@ -210,7 +209,7 @@ async def get_admins():
         return [r['user_id'] for r in rows]
 
 # ==============================================================================
-# ENGINES & DESIGNS
+# ENGINES
 # ==============================================================================
 def clean_text(text):
     text = re.sub(r'\*\*(.*?)\*\*', r'\1', text) 
@@ -517,15 +516,18 @@ async def get_subj(m: types.Message, state: FSMContext): await state.update_data
 async def get_teach(m: types.Message, state: FSMContext):
     await state.update_data(teacher=m.text)
     d = await state.get_data()
+    
+    kb = InlineKeyboardBuilder()
     if d['dtype'] == "taqdimot":
-        kb = InlineKeyboardBuilder()
         themes_list = list(PPTX_THEMES.keys())
         for th in themes_list: kb.button(text=th.replace("_", " ").title(), callback_data=f"d_{th}")
         kb.adjust(2)
+        kb.row(InlineKeyboardButton(text="❌ Bekor qilish", callback_data="cancel_gen"))
         await m.answer("🎨 <b>Dizaynni tanlang:</b>", parse_mode="HTML", reply_markup=kb.as_markup()); await state.set_state(Form.design)
     else:
         await state.update_data(design="simple")
-        kb = InlineKeyboardBuilder(); kb.button(text="Word (.docx)", callback_data="fmt_docx"); kb.button(text="PDF (.pdf)", callback_data="fmt_pdf"); kb.adjust(2)
+        kb.button(text="Word (.docx)", callback_data="fmt_docx"); kb.button(text="PDF (.pdf)", callback_data="fmt_pdf"); kb.adjust(2)
+        kb.row(InlineKeyboardButton(text="❌ Bekor qilish", callback_data="cancel_gen"))
         await m.answer("📂 <b>Formatni tanlang:</b>", parse_mode="HTML", reply_markup=kb.as_markup()); await state.set_state(Form.format)
 
 @router.callback_query(F.data.startswith("d_"), Form.design)
@@ -536,6 +538,7 @@ async def sel_design(c: CallbackQuery, state: FSMContext):
         p = await get_price(f"pptx_{i}")
         kb.button(text=f"{i} slayd ({p//1000}k)", callback_data=f"len_{i}_{p}")
     kb.adjust(2)
+    kb.row(InlineKeyboardButton(text="🔙 Orqaga", callback_data="back_to_design"))
     await c.message.edit_text("📄 <b>Slaydlar soni:</b>", parse_mode="HTML", reply_markup=kb.as_markup()); await state.set_state(Form.len)
 
 @router.callback_query(F.data.startswith("fmt_"), Form.format)
@@ -546,7 +549,31 @@ async def sel_fmt(c: CallbackQuery, state: FSMContext):
         p = await get_price(f"docx_{i}")
         kb.button(text=f"{i} bet ({p//1000}k)", callback_data=f"len_{i}_{p}")
     kb.adjust(2)
+    kb.row(InlineKeyboardButton(text="🔙 Orqaga", callback_data="back_to_fmt"))
     await c.message.edit_text("📄 <b>Hajmni tanlang:</b>", parse_mode="HTML", reply_markup=kb.as_markup()); await state.set_state(Form.len)
+
+# --- BACK BUTTON LOGIC ---
+@router.callback_query(F.data == "back_to_design", Form.len)
+async def back_to_design_handler(c: CallbackQuery, state: FSMContext):
+    kb = InlineKeyboardBuilder()
+    themes_list = list(PPTX_THEMES.keys())
+    for th in themes_list: kb.button(text=th.replace("_", " ").title(), callback_data=f"d_{th}")
+    kb.adjust(2)
+    kb.row(InlineKeyboardButton(text="❌ Bekor qilish", callback_data="cancel_gen"))
+    await c.message.edit_text("🎨 <b>Dizaynni tanlang:</b>", parse_mode="HTML", reply_markup=kb.as_markup())
+    await state.set_state(Form.design)
+
+@router.callback_query(F.data == "back_to_fmt", Form.len)
+async def back_to_fmt_handler(c: CallbackQuery, state: FSMContext):
+    kb = InlineKeyboardBuilder()
+    kb.button(text="Word (.docx)", callback_data="fmt_docx"); kb.button(text="PDF (.pdf)", callback_data="fmt_pdf"); kb.adjust(2)
+    kb.row(InlineKeyboardButton(text="❌ Bekor qilish", callback_data="cancel_gen"))
+    await c.message.edit_text("📂 <b>Formatni tanlang:</b>", parse_mode="HTML", reply_markup=kb.as_markup())
+    await state.set_state(Form.format)
+
+@router.callback_query(F.data == "cancel_gen")
+async def cancel_gen_btn(c: CallbackQuery, state: FSMContext):
+    await state.clear(); await c.message.delete(); await c.message.answer("❌ Bekor qilindi.", reply_markup=main_kb)
 
 @router.callback_query(F.data.startswith("len_"), Form.len)
 async def generate(c: CallbackQuery, state: FSMContext):
@@ -592,17 +619,23 @@ async def generate(c: CallbackQuery, state: FSMContext):
         await c.message.answer("Texnik xatolik.", reply_markup=main_kb)
     await state.clear()
 
-# --- ADMIN PANEL (TUZATILGAN) ---
+# --- ADMIN PANEL PRO (SAFE MODE) ---
+async def show_admin_main(m: types.Message):
+    kb = InlineKeyboardBuilder()
+    kb.button(text="📊 Hisobot (Log)", callback_data="adm_full_log")
+    kb.button(text="✉️ Reklama", callback_data="adm_bc")
+    kb.button(text="🛠 Narxlar", callback_data="adm_prices")
+    kb.button(text="🚪 Yopish", callback_data="close")
+    kb.adjust(1)
+    await m.answer("<b>🕴 ADMIN PANEL PRO</b>", parse_mode="HTML", reply_markup=kb.as_markup())
+
 @router.message(Command("admin"))
-async def admin_main(m: types.Message):
-    if await is_admin(m.from_user.id):
-        kb = InlineKeyboardBuilder()
-        kb.button(text="📊 Hisobot (Full Log)", callback_data="adm_full_log")
-        kb.button(text="✉️ Reklama", callback_data="adm_bc")
-        kb.button(text="🛠 Narxlar", callback_data="adm_prices")
-        kb.button(text="🚪 Yopish", callback_data="close")
-        kb.adjust(1)
-        await m.answer("<b>🕴 ADMIN PANEL PRO</b>", parse_mode="HTML", reply_markup=kb.as_markup())
+async def admin_cmd(m: types.Message):
+    if await is_admin(m.from_user.id): await show_admin_main(m)
+
+@router.callback_query(F.data == "admin_home")
+async def back_to_admin(c: CallbackQuery):
+    await c.message.delete(); await show_admin_main(c.message)
 
 @router.callback_query(F.data == "adm_full_log")
 async def adm_log_dl(c: CallbackQuery):
@@ -620,10 +653,7 @@ async def adm_log_dl(c: CallbackQuery):
 
 @router.callback_query(F.data == "adm_prices")
 async def adm_prices_ui(c: CallbackQuery):
-    # Old xabarni o'chirishga harakat qilamiz, bo'lmasa yangi yozamiz
-    try: await c.message.delete()
-    except: pass
-
+    await c.message.delete()
     kb = InlineKeyboardBuilder()
     txt = "💰 <b>NARXLARNI SOZLASH</b>\n\n"
     for k in DEFAULT_PRICES.keys():
@@ -631,7 +661,7 @@ async def adm_prices_ui(c: CallbackQuery):
         txt += f"▫️ {k.upper()}: <b>{v:,} so'm</b>\n"
         kb.button(text=f"✏️ {k.upper()}", callback_data=f"setp_{k}")
     
-    kb.button(text="🔙 Orqaga", callback_data="close")
+    kb.button(text="🔙 Orqaga", callback_data="admin_home")
     kb.adjust(2)
     await c.message.answer(txt, parse_mode="HTML", reply_markup=kb.as_markup())
 
@@ -651,6 +681,24 @@ async def adm_save_p(m: types.Message, state: FSMContext):
         await set_price(d['pk'], val)
         await m.answer(f"✅ Narx yangilandi: <b>{val:,} so'm</b>", parse_mode="HTML", reply_markup=main_kb)
     except: await m.answer("❌ Raqam yozing.")
+    await state.clear()
+
+@router.callback_query(F.data == "adm_bc")
+async def adm_bc_ui(c: CallbackQuery, state: FSMContext):
+    await c.message.delete()
+    await c.message.answer("✉️ <b>Reklama matnini (yoki rasmni) yuboring:</b>", parse_mode="HTML", reply_markup=cancel_kb)
+    await state.set_state(AdminState.bc_msg)
+
+@router.message(AdminState.bc_msg)
+async def adm_bc_send(m: types.Message, state: FSMContext):
+    await m.answer("🚀 Yuborilmoqda...")
+    async with pool.acquire() as conn:
+        users = await conn.fetch("SELECT user_id FROM users")
+        cnt = 0
+        for u in users:
+            try: await m.copy_to(u['user_id']); cnt+=1; await asyncio.sleep(0.05)
+            except: pass
+    await m.answer(f"✅ Xabar <b>{cnt}</b> ta foydalanuvchiga yuborildi.", parse_mode="HTML", reply_markup=main_kb)
     await state.clear()
 
 @router.callback_query(F.data == "close")
