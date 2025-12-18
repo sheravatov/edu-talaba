@@ -635,6 +635,147 @@ async def adm_send_one_final(m: types.Message, state: FSMContext):
         await m.answer(f"❌ Yuborib bo'lmadi. Ehtimol user botni bloklagan.\nXato: {e}", reply_markup=main_kb)
     await state.clear()
 
+# ==============================================================================
+# 💰 TO'LOV TIZIMI (FIXED)
+# ==============================================================================
+
+# 1. To'lov menyusini ochish
+@router.message(F.text == "💳 To'lov qilish")
+async def pay_menu(m: types.Message):
+    kb = InlineKeyboardBuilder()
+    # Tugmalar: Summa va Callback
+    kb.button(text="💎 5,000 so'm", callback_data="pay_5000")
+    kb.button(text="💎 10,000 so'm", callback_data="pay_10000")
+    kb.button(text="💎 15,000 so'm", callback_data="pay_15000")
+    kb.button(text="💎 20,000 so'm", callback_data="pay_20000")
+    kb.button(text="💎 50,000 so'm", callback_data="pay_50000")
+    kb.adjust(2)
+    kb.row(InlineKeyboardButton(text="❌ Yopish", callback_data="close"))
+    
+    await m.answer(
+        "👇 <b>Hisobni to'ldirish uchun summani tanlang:</b>\n\n"
+        "<i>Summani tanlaganingizdan so'ng, sizga karta raqam beriladi.</i>", 
+        parse_mode="HTML", 
+        reply_markup=kb.as_markup()
+    )
+
+# 2. Summa tanlanganda (Karta raqam berish)
+@router.callback_query(F.data.startswith("pay_"))
+async def pay_init(c: CallbackQuery, state: FSMContext):
+    try:
+        amount = int(c.data.split("_")[1])
+        await state.update_data(amount=amount)
+        
+        # Holatni o'zgartiramiz: Bot endi rasm kutyapti
+        await state.set_state(PayState.screenshot)
+        
+        msg_text = (
+            f"💳 <b>Karta Raqam:</b> <code>{KARTA_RAQAMI}</code>\n"
+            f"💰 <b>To'lov summasi:</b> {amount:,} so'm\n\n"
+            "📸 <b>Iltimos, to'lov qilganingiz haqidagi chekni (skrinshot) shu yerga yuboring.</b>\n"
+            "<i>Biz tekshirib, hisobingizni to'ldiramiz.</i>"
+        )
+        
+        await c.message.edit_text(msg_text, parse_mode="HTML")
+        # Orqaga qaytish tugmasi
+        kb = InlineKeyboardBuilder()
+        kb.button(text="❌ Bekor qilish", callback_data="cancel_pay")
+        await c.message.edit_reply_markup(reply_markup=kb.as_markup())
+        
+    except Exception as e:
+        print(f"Pay Init Error: {e}")
+
+# 3. Chekni (Rasmni) qabul qilish va Adminga yuborish
+@router.message(PayState.screenshot, F.photo)
+async def pay_check_photo(m: types.Message, state: FSMContext):
+    data = await state.get_data()
+    amount = data.get("amount", 0)
+    user = m.from_user
+    
+    # Admin tugmalari
+    kb = InlineKeyboardBuilder()
+    kb.button(text="✅ Tasdiqlash", callback_data=f"ap_{user.id}_{amount}")
+    kb.button(text="❌ Rad etish", callback_data=f"de_{user.id}")
+    kb.adjust(2)
+
+    # Adminlarni aniqlash
+    admins = await get_admins()
+    if ADMIN_ID not in admins: admins.append(ADMIN_ID) # Asosiy adminni qo'shish
+    
+    sent_count = 0
+    for admin_id in admins:
+        try:
+            await m.bot.send_photo(
+                chat_id=admin_id,
+                photo=m.photo[-1].file_id,
+                caption=(
+                    f"💸 <b>YANGI TO'LOV!</b>\n\n"
+                    f"👤 <b>User:</b> {user.full_name} (@{user.username})\n"
+                    f"🆔 <b>ID:</b> <code>{user.id}</code>\n"
+                    f"💰 <b>Summa:</b> {amount:,} so'm\n\n"
+                    f"<i>Tasdiqlaysizmi?</i>"
+                ),
+                parse_mode="HTML",
+                reply_markup=kb.as_markup()
+            )
+            sent_count += 1
+        except Exception as e:
+            print(f"Admin send error: {e}")
+
+    if sent_count > 0:
+        await m.answer("✅ <b>Chek yuborildi!</b>\nAdminlar tekshirib, tez orada hisobingizni to'ldirishadi.", parse_mode="HTML", reply_markup=main_kb)
+    else:
+        await m.answer("❌ Admin bilan bog'lanishda xatolik. Keyinroq urining.", reply_markup=main_kb)
+    
+    await state.clear()
+
+# 4. Agar rasm o'rniga yozuv yozsa
+@router.message(PayState.screenshot)
+async def pay_check_text(m: types.Message):
+    await m.answer("📸 Iltimos, faqat <b>to'lov cheki rasmini</b> yuboring yoki bekor qiling.", parse_mode="HTML")
+
+# 5. Bekor qilish (To'lov paytida)
+@router.callback_query(F.data == "cancel_pay", PayState.screenshot)
+async def pay_cancel(c: CallbackQuery, state: FSMContext):
+    await state.clear()
+    await c.message.delete()
+    await c.message.answer("❌ To'lov bekor qilindi.", reply_markup=main_kb)
+
+# 6. ADMIN: Tasdiqlash
+@router.callback_query(F.data.startswith("ap_"))
+async def approve_pay(c: CallbackQuery):
+    try:
+        parts = c.data.split("_")
+        uid = int(parts[1])
+        amount = int(parts[2])
+        
+        await update_balance(uid, amount, "deposit")
+        
+        # Admin xabarini o'zgartirish
+        await c.message.edit_caption(
+            caption=c.message.caption + "\n\n✅ <b>QABUL QILINDI</b>",
+            reply_markup=None,
+            parse_mode="HTML"
+        )
+        # Userga xabar
+        await c.bot.send_message(uid, f"✅ <b>To'lovingiz tasdiqlandi!</b>\nHisobingizga <b>{amount:,} so'm</b> qo'shildi.", parse_mode="HTML")
+    except Exception as e:
+        await c.answer(f"Xatolik: {e}", show_alert=True)
+
+# 7. ADMIN: Rad etish
+@router.callback_query(F.data.startswith("de_"))
+async def deny_pay(c: CallbackQuery):
+    try:
+        uid = int(c.data.split("_")[1])
+        
+        await c.message.edit_caption(
+            caption=c.message.caption + "\n\n❌ <b>RAD ETILDI</b>",
+            reply_markup=None,
+            parse_mode="HTML"
+        )
+        await c.bot.send_message(uid, "❌ <b>To'lovingiz rad etildi.</b>\nChek noto'g'ri yoki xira bo'lishi mumkin.", parse_mode="HTML")
+    except: pass
+        
 @router.callback_query(F.data == "close")
 async def close_cb(c: CallbackQuery): await c.message.delete()
 @router.message(F.text == "❌ Bekor qilish")
