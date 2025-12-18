@@ -10,7 +10,7 @@ from io import BytesIO, StringIO
 from datetime import datetime
 from itertools import cycle
 
-# --- ENV ---
+# --- ENV SOZLAMALARI ---
 try:
     from dotenv import load_dotenv
     load_dotenv()
@@ -30,7 +30,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.exceptions import TelegramForbiddenError, TelegramBadRequest
 from aiogram.utils.deep_linking import create_start_link
 
-# --- WEB SERVER ---
+# --- WEB SERVER (RENDER UCHUN) ---
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse
 import uvicorn
@@ -41,7 +41,7 @@ app = FastAPI()
 @app.head("/")
 @app.get("/", response_class=HTMLResponse)
 async def home():
-    return "<h1>EduBot Pro Running...</h1>"
+    return "<h1>EduBot Pro is Running...</h1>"
 
 async def run_web_server():
     port = int(os.environ.get("PORT", 8000))
@@ -49,7 +49,7 @@ async def run_web_server():
     server = uvicorn.Server(config)
     await server.serve()
 
-# --- CONFIG ---
+# --- KONFIGURATSIYA ---
 from openai import AsyncOpenAI
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 ADMIN_ID = int(os.environ.get("ADMIN_ID", 0))
@@ -68,7 +68,7 @@ DEFAULT_PRICES = {
     "docx_15": 5000, "docx_20": 7000, "docx_30": 12000
 }
 
-# --- LIBS ---
+# --- KUTUBXONALAR ---
 from docx import Document
 from docx.shared import Pt, Cm
 from docx.enum.text import WD_ALIGN_PARAGRAPH
@@ -79,7 +79,7 @@ from pptx.enum.shapes import MSO_SHAPE
 from pptx.enum.text import PP_ALIGN
 from fpdf import FPDF
 
-# FONT FIX
+# FONTNI TEKSHIRISH (PDF UCHUN)
 FONT_PATH = "DejaVuSans.ttf"
 def check_font():
     if not os.path.exists(FONT_PATH):
@@ -92,7 +92,7 @@ def check_font():
 check_font()
 
 # ==============================================================================
-# DATABASE SYSTEM
+# MA'LUMOTLAR BAZASI (DATABASE)
 # ==============================================================================
 pool = None
 
@@ -101,7 +101,7 @@ async def init_db():
     try:
         pool = await asyncpg.create_pool(dsn=DATABASE_URL, min_size=1, max_size=10)
         async with pool.acquire() as conn:
-            # Users
+            # Users jadvali
             await conn.execute("""
                 CREATE TABLE IF NOT EXISTS users (
                     user_id BIGINT PRIMARY KEY, username TEXT, full_name TEXT, 
@@ -117,7 +117,7 @@ async def init_db():
                 await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS free_pdf INTEGER DEFAULT 2")
             except: pass
 
-            # History
+            # History jadvali
             await conn.execute("""
                 CREATE TABLE IF NOT EXISTS history (
                     id SERIAL PRIMARY KEY, user_id BIGINT, 
@@ -135,7 +135,7 @@ async def init_db():
                 await conn.execute("ALTER TABLE history ADD COLUMN IF NOT EXISTS teacher TEXT DEFAULT '-'")
             except: pass
             
-            # Other
+            # Boshqa jadvallar
             await conn.execute("CREATE TABLE IF NOT EXISTS transactions (id SERIAL PRIMARY KEY, user_id BIGINT, amount INTEGER, date TEXT, type TEXT)")
             await conn.execute("CREATE TABLE IF NOT EXISTS prices (key TEXT PRIMARY KEY, value INTEGER)")
             await conn.execute("CREATE TABLE IF NOT EXISTS admins (user_id BIGINT PRIMARY KEY, added_date TEXT)")
@@ -147,7 +147,7 @@ async def init_db():
             print("✅ Baza yuklandi.")
     except Exception as e: print(f"DB Error: {e}")
 
-# DB Functions
+# DB Funksiyalari
 async def get_user(uid):
     if not pool: return None
     async with pool.acquire() as conn: return await conn.fetchrow("SELECT * FROM users WHERE user_id=$1", uid)
@@ -209,7 +209,7 @@ async def get_admins():
         return [r['user_id'] for r in rows]
 
 # ==============================================================================
-# ENGINES
+# ENGINES (HUJJAT YARATISH)
 # ==============================================================================
 def clean_text(text):
     text = re.sub(r'\*\*(.*?)\*\*', r'\1', text) 
@@ -346,7 +346,7 @@ def create_pdf(data_list, info, doc_type="Referat"):
     out = BytesIO(); out.write(pdf.output()); out.seek(0); return out
 
 # ==============================================================================
-# AI LOGIC
+# AI MANTIQ (MATN YOZISH)
 # ==============================================================================
 async def call_groq(messages):
     if not GROQ_API_KEYS: return None
@@ -397,7 +397,7 @@ async def generate_full_content(topic, pages, doc_type, custom_plan, status_msg)
         return data
 
 # ==============================================================================
-# HANDLERS
+# BOT HANDLERS (BUYRUQLAR)
 # ==============================================================================
 router = Router()
 main_kb = ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="📊 Taqdimot"), KeyboardButton(text="📝 Mustaqil ish")], [KeyboardButton(text="📑 Referat"), KeyboardButton(text="💰 Balans & Referal")], [KeyboardButton(text="💳 To'lov qilish"), KeyboardButton(text="📞 Yordam")]], resize_keyboard=True)
@@ -552,9 +552,10 @@ async def sel_fmt(c: CallbackQuery, state: FSMContext):
     kb.row(InlineKeyboardButton(text="🔙 Orqaga", callback_data="back_to_fmt"))
     await c.message.edit_text("📄 <b>Hajmni tanlang:</b>", parse_mode="HTML", reply_markup=kb.as_markup()); await state.set_state(Form.len)
 
-# --- BACK BUTTON LOGIC (Fixed) ---
+# --- 100% ISHLAYDIGAN ORQAGA QAYTISH TIZIMI ---
 @router.callback_query(F.data == "back_to_design")
 async def back_to_design_handler(c: CallbackQuery, state: FSMContext):
+    await c.answer()
     kb = InlineKeyboardBuilder()
     themes_list = list(PPTX_THEMES.keys())
     for th in themes_list: kb.button(text=th.replace("_", " ").title(), callback_data=f"d_{th}")
@@ -565,6 +566,7 @@ async def back_to_design_handler(c: CallbackQuery, state: FSMContext):
 
 @router.callback_query(F.data == "back_to_fmt")
 async def back_to_fmt_handler(c: CallbackQuery, state: FSMContext):
+    await c.answer()
     kb = InlineKeyboardBuilder()
     kb.button(text="Word (.docx)", callback_data="fmt_docx"); kb.button(text="PDF (.pdf)", callback_data="fmt_pdf"); kb.adjust(2)
     kb.row(InlineKeyboardButton(text="❌ Bekor qilish", callback_data="cancel_gen"))
@@ -619,7 +621,7 @@ async def generate(c: CallbackQuery, state: FSMContext):
         await c.message.answer("Texnik xatolik.", reply_markup=main_kb)
     await state.clear()
 
-# --- ADMIN PANEL PRO ---
+# --- ADMIN PANEL PRO (SAFE MODE) ---
 async def show_admin_main(m: types.Message):
     kb = InlineKeyboardBuilder()
     kb.button(text="📊 Hisobot (Log)", callback_data="adm_full_log")
