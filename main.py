@@ -399,16 +399,34 @@ async def generate_full_content(topic, pages, doc_type, custom_plan, status_msg)
 # ==============================================================================
 # BOT HANDLERS (BUYRUQLAR)
 # ==============================================================================
+# ==============================================================================
+# HANDLERS (BUYRUQLAR) - TUZATILGAN VERSIYA
+# ==============================================================================
 router = Router()
+
+# Klaviaturalar
 main_kb = ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="📊 Taqdimot"), KeyboardButton(text="📝 Mustaqil ish")], [KeyboardButton(text="📑 Referat"), KeyboardButton(text="💰 Balans & Referal")], [KeyboardButton(text="💳 To'lov qilish"), KeyboardButton(text="📞 Yordam")]], resize_keyboard=True)
 cancel_kb = ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="❌ Bekor qilish")]], resize_keyboard=True)
 skip_kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="➡️ O'tkazib yuborish", callback_data="skip")]])
 
+# Holatlar (States)
 class Form(StatesGroup):
     type = State(); topic = State(); plan = State(); student = State(); uni = State(); fac = State(); grp = State(); subj = State(); teach = State(); design = State(); len = State(); format = State()
 class PayState(StatesGroup): screenshot = State(); amount = State()
 class AdminState(StatesGroup): bc_msg=State(); bc_id=State(); bc_text=State(); add_adm=State(); price_val=State(); bc_one_msg=State(); bc_one_id=State()
 
+# --- 1. ENG MUHIMI: BEKOR QILISH (ENG TEPADA TURISHI SHART) ---
+@router.message(F.text == "❌ Bekor qilish")
+async def cancel_all(m: types.Message, state: FSMContext):
+    current_state = await state.get_state()
+    if current_state is None:
+        await m.answer("Hozir hech qanday jarayon ketmayapti.", reply_markup=main_kb)
+        return
+
+    await state.clear()
+    await m.answer("✅ Jarayon bekor qilindi.", reply_markup=main_kb)
+
+# --- START ---
 @router.message(CommandStart())
 async def start(m: types.Message, command: CommandObject):
     try:
@@ -426,6 +444,7 @@ async def start(m: types.Message, command: CommandObject):
         await m.answer(txt, parse_mode="HTML", reply_markup=main_kb)
     except: pass
 
+# --- MENYU BUYRUQLARI ---
 @router.message(F.text == "📞 Yordam")
 async def help_cmd(m: types.Message):
     txt = (
@@ -453,34 +472,7 @@ async def balance(m: types.Message):
         )
         await m.answer(txt, parse_mode="HTML")
 
-@router.message(F.text == "💳 To'lov qilish")
-async def pay_menu(m: types.Message):
-    kb = InlineKeyboardBuilder()
-    for x in [5000, 10000, 20000, 50000]: kb.button(text=f"💎 {x:,}", callback_data=f"pay_{x}")
-    kb.adjust(2); kb.row(InlineKeyboardButton(text="❌ Yopish", callback_data="close"))
-    await m.answer("👇 <b>To'lov summasini tanlang:</b>", parse_mode="HTML", reply_markup=kb.as_markup())
-
-@router.callback_query(F.data.startswith("pay_"))
-async def pay_init(c: CallbackQuery, state: FSMContext):
-    amt = int(c.data.split("_")[1]); await state.update_data(amount=amt)
-    await c.message.edit_text(f"💳 <b>Karta:</b> <code>{KARTA_RAQAMI}</code>\n💰 <b>Summa:</b> {amt:,} so'm\n📸 Chekni yuboring.", parse_mode="HTML"); await state.set_state(PayState.screenshot)
-
-@router.message(PayState.screenshot, F.photo)
-async def pay_check(m: types.Message, state: FSMContext):
-    d = await state.get_data(); amt = d['amount']
-    kb = InlineKeyboardBuilder(); kb.button(text="✅ Tasdiqlash", callback_data=f"ap_{m.from_user.id}_{amt}"); kb.button(text="❌ Rad", callback_data=f"de_{m.from_user.id}")
-    for admin in await get_admins():
-        try: await m.bot.send_photo(admin, m.photo[-1].file_id, caption=f"💸 <b>To'lov:</b> {amt:,}\n👤 {m.from_user.full_name}", parse_mode="HTML", reply_markup=kb.as_markup())
-        except: pass
-    await m.answer("✅ <b>Yuborildi!</b>", parse_mode="HTML", reply_markup=main_kb); await state.clear()
-
-@router.callback_query(F.data.startswith("ap_"))
-async def approve(c: CallbackQuery):
-    try:
-        _, uid, amt = c.data.split("_"); await update_balance(int(uid), int(amt))
-        await c.message.delete(); await c.bot.send_message(int(uid), f"✅ <b>To'lov qabul qilindi:</b> +{int(amt):,} so'm", parse_mode="HTML")
-    except: pass
-
+# --- HUJJAT YARATISH JARAYONI ---
 @router.message(F.text.in_(["📊 Taqdimot", "📝 Mustaqil ish", "📑 Referat"]))
 async def start_order(m: types.Message, state: FSMContext):
     u = await get_user(m.from_user.id)
@@ -490,7 +482,12 @@ async def start_order(m: types.Message, state: FSMContext):
     await m.answer("📝 <b>Mavzuni yozing:</b>", parse_mode="HTML", reply_markup=cancel_kb); await state.set_state(Form.topic)
 
 @router.message(Form.topic)
-async def get_topic(m: types.Message, state: FSMContext): await state.update_data(topic=m.text); await m.answer("📋 <b>Reja bormi?</b> (Yozing yoki o'tkazing)", parse_mode="HTML", reply_markup=skip_kb); await state.set_state(Form.plan)
+async def get_topic(m: types.Message, state: FSMContext): 
+    # BU YERDA ENDI 'BEKOR QILISH' O'TIB KETMAYDI
+    await state.update_data(topic=m.text)
+    await m.answer("📋 <b>Reja bormi?</b> (Yozing yoki o'tkazing)", parse_mode="HTML", reply_markup=skip_kb)
+    await state.set_state(Form.plan)
+
 @router.callback_query(F.data == "skip", Form.plan)
 async def skip_p(c: CallbackQuery, state: FSMContext): await state.update_data(plan="-"); await c.message.answer("👤 <b>Ism-Familiya:</b>", parse_mode="HTML"); await state.set_state(Form.student)
 @router.message(Form.plan)
@@ -529,98 +526,6 @@ async def get_teach(m: types.Message, state: FSMContext):
         kb.button(text="Word (.docx)", callback_data="fmt_docx"); kb.button(text="PDF (.pdf)", callback_data="fmt_pdf"); kb.adjust(2)
         kb.row(InlineKeyboardButton(text="❌ Bekor qilish", callback_data="cancel_gen"))
         await m.answer("📂 <b>Formatni tanlang:</b>", parse_mode="HTML", reply_markup=kb.as_markup()); await state.set_state(Form.format)
-
-@router.callback_query(F.data.startswith("d_"), Form.design)
-async def sel_design(c: CallbackQuery, state: FSMContext):
-    await state.update_data(design=c.data[2:], fmt="pptx")
-    kb = InlineKeyboardBuilder()
-    for i in [10, 15, 20]:
-        p = await get_price(f"pptx_{i}")
-        kb.button(text=f"{i} slayd ({p//1000}k)", callback_data=f"len_{i}_{p}")
-    kb.adjust(2)
-    kb.row(InlineKeyboardButton(text="🔙 Orqaga", callback_data="back_to_design"))
-    await c.message.edit_text("📄 <b>Slaydlar soni:</b>", parse_mode="HTML", reply_markup=kb.as_markup()); await state.set_state(Form.len)
-
-@router.callback_query(F.data.startswith("fmt_"), Form.format)
-async def sel_fmt(c: CallbackQuery, state: FSMContext):
-    await state.update_data(fmt=c.data[4:])
-    kb = InlineKeyboardBuilder()
-    for i in [15, 20, 30]:
-        p = await get_price(f"docx_{i}")
-        kb.button(text=f"{i} bet ({p//1000}k)", callback_data=f"len_{i}_{p}")
-    kb.adjust(2)
-    kb.row(InlineKeyboardButton(text="🔙 Orqaga", callback_data="back_to_fmt"))
-    await c.message.edit_text("📄 <b>Hajmni tanlang:</b>", parse_mode="HTML", reply_markup=kb.as_markup()); await state.set_state(Form.len)
-
-# --- 100% ISHLAYDIGAN ORQAGA QAYTISH TIZIMI ---
-@router.callback_query(F.data == "back_to_design")
-async def back_to_design_handler(c: CallbackQuery, state: FSMContext):
-    await c.answer()
-    kb = InlineKeyboardBuilder()
-    themes_list = list(PPTX_THEMES.keys())
-    for th in themes_list: kb.button(text=th.replace("_", " ").title(), callback_data=f"d_{th}")
-    kb.adjust(2)
-    kb.row(InlineKeyboardButton(text="❌ Bekor qilish", callback_data="cancel_gen"))
-    await c.message.edit_text("🎨 <b>Dizaynni tanlang:</b>", parse_mode="HTML", reply_markup=kb.as_markup())
-    await state.set_state(Form.design)
-
-@router.callback_query(F.data == "back_to_fmt")
-async def back_to_fmt_handler(c: CallbackQuery, state: FSMContext):
-    await c.answer()
-    kb = InlineKeyboardBuilder()
-    kb.button(text="Word (.docx)", callback_data="fmt_docx"); kb.button(text="PDF (.pdf)", callback_data="fmt_pdf"); kb.adjust(2)
-    kb.row(InlineKeyboardButton(text="❌ Bekor qilish", callback_data="cancel_gen"))
-    await c.message.edit_text("📂 <b>Formatni tanlang:</b>", parse_mode="HTML", reply_markup=kb.as_markup())
-    await state.set_state(Form.format)
-
-@router.callback_query(F.data == "cancel_gen")
-async def cancel_gen_btn(c: CallbackQuery, state: FSMContext):
-    await state.clear(); await c.message.delete(); await c.message.answer("❌ Bekor qilindi.", reply_markup=main_kb)
-
-@router.callback_query(F.data.startswith("len_"), Form.len)
-async def generate(c: CallbackQuery, state: FSMContext):
-    await c.message.delete()
-    try:
-        _, page_str, cost_str = c.data.split("_"); pages=int(page_str); cost=int(cost_str)
-        uid = c.from_user.id; u = await get_user(uid)
-        d = await state.get_data()
-        
-        limit_key = f"free_{d['fmt']}" if d['fmt'] in ['docx','pptx','pdf'] else "free_docx"
-        is_free = u.get(limit_key, 0) > 0
-        
-        if not is_free and u['balance'] < cost:
-            return await c.message.answer(f"❌ <b>Mablag' yetarli emas!</b>\nNarxi: {cost:,} so'm", parse_mode="HTML", reply_markup=main_kb)
-            
-        msg = await c.message.answer("⏳ <b>Qabul qilindi!</b>\nAI ishga tushdi...", parse_mode="HTML")
-        content = await generate_full_content(d['topic'], pages, d['dtype'], d['plan'], msg)
-        
-        if not content: return await msg.edit_text("❌ Xatolik. Qayta urinib ko'ring.")
-        
-        info = {k: d.get(k, "-") for k in ['topic','student','uni','fac','grp','subj','teacher']}
-        info['edu_place'] = d.get('uni', '-')
-        info['direction'] = d.get('fac', '-')
-        info['group'] = d.get('grp', '-')
-        info['subject'] = d.get('subj', '-')
-        
-        if d['fmt'] == "pptx":
-            f = create_presentation(content, info, d['design']); fn, cap = f"{d['topic'][:20]}.pptx", "✅ Slayd tayyor!"
-        elif d['fmt'] == "pdf":
-            f = create_pdf(content, info, d['dtype']); fn, cap = f"{d['topic'][:20]}.pdf", "✅ PDF tayyor!"
-        else:
-            f = create_document(content, info, d['dtype']); fn, cap = f"{d['topic'][:20]}.docx", "✅ DOCX tayyor!"
-            
-        await c.message.answer_document(BufferedInputFile(f.read(), filename=fn), caption=cap, reply_markup=main_kb)
-        await msg.delete()
-        
-        if is_free: await update_limit(uid, limit_key, -1)
-        else: await update_balance(uid, -cost, "service_fee")
-        await add_full_hist(uid, d['dtype'], d['topic'], pages, info)
-        
-    except Exception as e:
-        print(f"ERR: {e}")
-        await c.message.answer("Texnik xatolik.", reply_markup=main_kb)
-    await state.clear()
-
 # --- ADMIN PANEL PRO (SAFE MODE) ---
 async def show_admin_main(m: types.Message):
     kb = InlineKeyboardBuilder()
